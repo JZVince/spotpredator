@@ -1,0 +1,21 @@
+# Core ML and Camera
+numpy>=1.24.0
+pillow>=10.0.0
+picamera2>=0.3.0
+
+# LoRa Communication
+pyserial>=3.5
+
+# RTC Module
+smbus2>=0.4.2
+
+# OLED Display
+adafruit-circuitpython-ssd1306>=2.12.0
+adafruit-blinka>=8.20.0
+
+# GPIO Control
+RPi.GPIO>=0.7.1
+gpiozero>=2.0
+
+# Configuration
+PyYAML>=6.0

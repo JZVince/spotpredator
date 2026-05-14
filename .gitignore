@@ -1,0 +1,23 @@
+# Environment files
+.env
+**/.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+
+# Data
+data/logs/
+data/detections/
+data/scans/
+
+# Models (large files)
+models/*.tflite
+
+# Project log
+PROJECT_LOG.txt
+
+# Mac
+.DS_Store

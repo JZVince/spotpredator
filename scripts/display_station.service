@@ -1,0 +1,14 @@
+[Unit]
+Description=SpotPredator Home Display Station
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/spotpredator
+ExecStart=/home/pi/spotpredator/venv/bin/python display_station/main.py
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

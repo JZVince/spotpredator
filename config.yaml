@@ -1,0 +1,51 @@
+# SpotPredator Configuration File
+# Simple configuration for your first Raspberry Pi + AI project
+
+camera:
+  resolution: [640, 480]  # Keep it moderate for Pi Zero 2 W
+  framerate: 15
+  rotation: 0  # Adjust if camera is mounted upside down
+
+detector:
+  model_path: "models/spotpredator_classifier.tflite"
+  labels_path: "models/classifier_labels.txt"
+  confidence_threshold: 0.85  # 85% confidence required for alert
+  target_classes:
+    - predator
+  ignore_classes:
+    - background
+    - poultry
+
+hardware:
+  camera:
+    type: "arducam_module3"
+  lora:
+    module: "rylr998"
+    uart_port: "/dev/serial0"
+    baud_rate: 115200
+    frequency: 915  # MHz (use 868 for EU)
+    network_id: 18  # Change if you have multiple LoRa networks nearby
+  rtc:
+    module: "ds3231"
+    i2c_address: 0x68
+  buzzer:
+    gpio_pin: 27
+    duration_seconds: 3
+
+alerts:
+  buzzer_enabled: false
+  lora_broadcast: true
+  save_images: true
+  image_path: "data/detections/"
+  log_path: "data/logs/detections.log"
+
+detection:
+  check_interval: 15  # Seconds between each check
+  cooldown_period: 180  # Wait 3 minutes before alerting again for same animal type
+
+  # Schedule: Only detect during these hours
+  schedule_enabled: true  # Set to false to run 24/7
+  start_hour: 6  # Start detection at 6:00 AM
+  start_minute: 0
+  end_hour: 21  # End detection at 9:01 PM (21:00)
+  end_minute: 1

@@ -1,0 +1,10 @@
+Hawk
+PossumBrushtail
+cat
+chicken
+cow
+dog
+fox
+goat
+opossum
+person
