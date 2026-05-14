@@ -83,7 +83,7 @@ The model is trained using transfer learning from ImageNet weights. Training is 
 
 Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/) to flash **Raspberry Pi OS Lite (64-bit)** to your microSD card. Enable SSH and configure WiFi in the imager settings before flashing.
 
-> **WiFi tip**: Raspberry Pi works best on 2.4GHz networks. If you have trouble connecting, disable WiFi 6 mode and roaming assistant on your router, and separate your 2.4GHz and 5GHz networks.
+> **WiFi tip**: Raspberry Pi zero 2 W works best on 2.4GHz networks. If you have trouble connecting, disable WiFi 6 mode and roaming assistant on your router, and separate your 2.4GHz and 5GHz networks. If you have remote connection issue, check these settings.
 
 ### 2. Enable Required Interfaces
 
@@ -222,6 +222,15 @@ See [WIRING.md](WIRING.md) for full pin diagrams for both devices.
 
 ## Troubleshooting
 
+### Cannot SSH into Pi — connection refused or times out
+- Before assuming hardware failure (SD card, cable, Pi itself), check your router first
+- Pi Zero 2 W only supports **2.4GHz WiFi** — if your router broadcasts a combined 2.4/5GHz network, the Pi may fail to connect
+- I'm not saying 5GHz won't work completely, but sure I had a lot issue with it.
+- Disable **WiFi 6 (802.11ax)** mode on your router — Pi Zero 2 W does not support it
+- Disable **roaming assistant** or **band steering** on your router — these features can kick pi devices out of connection due to low signal strength.
+- Separate your 2.4GHz and 5GHz into two distinct networks and connect the Pi to the 2.4GHz one explicitly. A lot older devices work the best with 2.4GHz, same result for my BambuLab Printer and regular printer.
+- After changing router settings, re-flash the SD card with the correct WiFi credentials and try again
+
 ### Camera not working
 - Reseat the ribbon cable firmly — this is the most common cause
 - Run `libcamera-hello` to test
@@ -249,10 +258,15 @@ See [WIRING.md](WIRING.md) for full pin diagrams for both devices.
 - Disable WiFi power saving: `sudo iw dev wlan0 set power_save off`
 - Add `autoconnect-retries=0` to your `.nmconnection` file for unlimited retries
 
-### Model classifying everything as background
+### Model producing identical confidence scores for every scan
 - Test with a known image: does inference output change with different inputs?
 - If probabilities are identical regardless of input — model has collapsed, retrain required
-- Check BGR/RGB color channel order in preprocessing
+- Common causes of model collapse:
+  - **Learning rate too high during fine-tuning** — destroys pretrained ImageNet weights early in training, leaving the model unable to generalize
+  - **Too many background images** — if background heavily outnumbers other classes, the model learns to always predict background as a safe default
+  - **Imbalanced dataset** — aim for roughly equal class sizes; background should be a small fraction (~10-15%) of total images
+  - **Augmentation too aggressive** — heavy distortion during training can prevent the model from learning meaningful features
+- Before deploying any retrained model, always test it locally with a few known images and confirm confidence scores change with different inputs
 
 ---
 
