@@ -1,6 +1,6 @@
 # SpotPredator
 
-An AI-powered farm predator detection system built on Raspberry Pi Zero 2 W. SpotPredator uses a custom-trained EfficientNetB0 computer vision model to identify predators in real time, and alerts you wirelessly via LoRa radio — no internet required in the field. Free from monthly subscription plans.
+An AI-powered farm predator detection system built on Raspberry Pi Zero 2 W. SpotPredator uses a custom-trained EfficientNetB0 computer vision model to identify predators in real time, and alerts you wirelessly via LoRa radio — no internet required in the field with long range option. Free from monthly subscription plans.
 
 ---
 
@@ -13,8 +13,8 @@ This is my first Raspberry Pi, computer vision, and soldering project — built 
 The system consists of two devices. Field detector code lives in `src/`, display station code lives in `display_station/`.
 
 **Field Detector** — deployed outdoors near your animals
-- Captures images every 15 seconds using a Raspberry Pi camera
-- Runs AI inference locally using a TFLite classification model or YOLOV8 Nano object detection model
+- Captures images every 15 seconds using a Arducam Camera (Cheaper)
+- Runs AI inference locally using a TFLite classification model (WIP: YOLOV8 Nano object detection model)
 - Sounds a buzzer alarm on detection
 - Transmits alerts wirelessly to your home via LoRa radio
 - Sends heartbeat status updates every 30 minutes to keep you updated on system status
@@ -118,7 +118,7 @@ pip install -r requirements.txt
 
 System packages also required:
 ```bash
-sudo apt install -y python3-picamera2 i2c-tools libio-socket-ssl-perl perl
+sudo apt install -y python3-picamera2 i2c-tools libio-socket-ssl-perl libauthen-sasl-perl perl
 ```
 
 ### 5. Configure Email (Display Station only)
@@ -275,11 +275,10 @@ See [WIRING.md](WIRING.md) for full pin diagrams for both devices.
 - Retrain model with images captured directly from field camera for better real-world accuracy
 - Training YOLOv8 Nano with custom dataset for a better object detection model
 - Expand predator classes with more species-specific training data
-- Add night vision / IR camera support for dawn and dusk detection
 - Improve enclosure weatherproofing with ventilation and heatsink - This has to do with 3D printing design
 - Add physical button on display station to acknowledge and clear alerts
-- Explore ESP32 as a lower-cost alternative for the display station
-- Write an app for quick installation.
+- Explore ESP32 as a lower-cost alternative for the display station and other budget options
+- Write an app for quick installation
 
 ---
 

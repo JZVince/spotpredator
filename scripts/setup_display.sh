@@ -29,7 +29,10 @@ echo "Step 2: Installing system packages..."
 sudo apt install -y \
     python3-pip \
     i2c-tools \
-    git
+    git \
+    perl \
+    libio-socket-ssl-perl \
+    libauthen-sasl-perl
 
 # Install Python packages (display station only needs these)
 echo ""
