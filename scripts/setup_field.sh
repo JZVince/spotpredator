@@ -1,7 +1,10 @@
 #!/bin/bash
-# Setup script for Field Detector Raspberry Pi
+# Setup script for SpotPredator Field Detector
+# Run this once on a fresh Raspberry Pi OS Lite install
 
 set -e
+
+INSTALL_DIR="/home/pi/spotpredator"
 
 echo "=========================================="
 echo "SpotPredator - Field Detector Setup"
@@ -10,7 +13,7 @@ echo ""
 
 # Check if running on Raspberry Pi
 if ! grep -q "Raspberry Pi" /proc/cpuinfo 2>/dev/null; then
-    echo "⚠️  Warning: This doesn't appear to be a Raspberry Pi"
+    echo "Warning: This doesn't appear to be a Raspberry Pi"
     read -p "Continue anyway? (y/N) " -n 1 -r
     echo
     if [[ ! $REPLY =~ ^[Yy]$ ]]; then
@@ -18,38 +21,44 @@ if ! grep -q "Raspberry Pi" /proc/cpuinfo 2>/dev/null; then
     fi
 fi
 
-# Update system
-echo "Step 1: Updating system..."
-sudo apt update
-sudo apt upgrade -y
+# Step 1: System update
+echo "Step 1: Updating system packages..."
+sudo apt update && sudo apt upgrade -y
 
-# Install system packages
+# Step 2: System dependencies
 echo ""
-echo "Step 2: Installing system packages..."
+echo "Step 2: Installing system dependencies..."
 sudo apt install -y \
     python3-pip \
+    python3-full \
+    python3-venv \
     python3-picamera2 \
     i2c-tools \
-    git \
-    wget \
-    unzip \
-    libcap-dev
+    git
 
-# Create virtual environment and install Python packages
+# Step 3: Python virtual environment
 echo ""
-echo "Step 3: Creating virtual environment and installing Python packages..."
-sudo apt install -y python3-full python3-venv
-python3 -m venv ~/spotpredator/venv
-source ~/spotpredator/venv/bin/activate
-pip3 install -r requirements.txt
+echo "Step 3: Setting up Python virtual environment..."
+python3 -m venv "$INSTALL_DIR/venv"
+source "$INSTALL_DIR/venv/bin/activate"
+pip install --upgrade pip
+pip install -r "$INSTALL_DIR/requirements.txt"
+deactivate
 
-# Enable interfaces
+# Step 4: Create data directories
 echo ""
-echo "Step 4: Enabling hardware interfaces..."
-echo "You need to enable:"
-echo "  - Camera"
+echo "Step 4: Creating data directories..."
+mkdir -p "$INSTALL_DIR/data/logs"
+mkdir -p "$INSTALL_DIR/data/detections"
+mkdir -p "$INSTALL_DIR/data/scans"
+
+# Step 5: Enable hardware interfaces
+echo ""
+echo "Step 5: Hardware interfaces"
+echo "You need to enable the following in raspi-config:"
+echo "  - Camera (libcamera)"
 echo "  - I2C"
-echo "  - Serial Port (enable port, disable console)"
+echo "  - Serial Port: disable login shell, keep hardware enabled"
 echo ""
 read -p "Open raspi-config now? (y/N) " -n 1 -r
 echo
@@ -57,37 +66,36 @@ if [[ $REPLY =~ ^[Yy]$ ]]; then
     sudo raspi-config
 fi
 
-# Download model
+# Step 6: Install systemd service
 echo ""
-echo "Step 5: Downloading AI model..."
-./scripts/download_model.sh
+echo "Step 6: Installing systemd service..."
+sudo cp "$INSTALL_DIR/scripts/spotpredator.service" /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable spotpredator
+echo "Service installed and enabled (will start on next boot)"
 
-# Create directories
+# Step 7: Place model reminder
 echo ""
-echo "Step 6: Creating data directories..."
-mkdir -p data/detections data/logs
-
-# Test I2C
+echo "Step 7: AI Model"
+echo "Place your trained model files in $INSTALL_DIR/models/:"
+echo "  - spotpredator_classifier.tflite"
+echo "  - classifier_labels.txt"
 echo ""
-echo "Step 7: Testing I2C devices..."
-if command -v i2cdetect &> /dev/null; then
-    echo "Scanning I2C bus..."
-    i2cdetect -y 1 || true
+if [ ! -f "$INSTALL_DIR/models/spotpredator_classifier.tflite" ]; then
+    echo "Warning: Model file not found. Detection will not work until model is placed."
 fi
 
 echo ""
 echo "=========================================="
-echo "✅ Setup Complete!"
+echo "Setup Complete!"
 echo "=========================================="
 echo ""
 echo "Next steps:"
-echo "1. Reboot: sudo reboot"
-echo "2. Connect hardware (see WIRING.md)"
-echo "3. Activate virtual environment first:"
-echo "   source ~/spotpredator/venv/bin/activate"
-echo "4. Test components:"
-echo "   - python3 scripts/test_camera.py"
-echo "   - python3 scripts/test_lora.py"
-echo "   - python3 scripts/test_buzzer.py"
-echo "5. Run detector: python3 src/main.py"
+echo "1. Place your model in $INSTALL_DIR/models/"
+echo "2. Check wiring: see WIRING.md"
+echo "3. Test components:"
+echo "   source $INSTALL_DIR/venv/bin/activate"
+echo "   python3 $INSTALL_DIR/tests/test_camera.py"
+echo "   python3 $INSTALL_DIR/tests/test_lora.py"
+echo "4. Reboot to start the service: sudo reboot"
 echo ""

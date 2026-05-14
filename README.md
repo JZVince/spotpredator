@@ -83,7 +83,7 @@ The model is trained using transfer learning from ImageNet weights. Training is 
 
 Use [Raspberry Pi Imager](https://www.raspberrypi.com/software/) to flash **Raspberry Pi OS Lite (64-bit)** to your microSD card. Enable SSH and configure WiFi in the imager settings before flashing.
 
-> **WiFi tip**: Raspberry Pi zero 2 W works best on 2.4GHz networks. If you have trouble connecting, disable WiFi 6 mode and roaming assistant on your router, and separate your 2.4GHz and 5GHz networks. If you have remote connection issue, check these settings.
+> **WiFi tip**: Raspberry Pi Zero 2 W only supports 2.4GHz WiFi. If you have trouble connecting, disable WiFi 6 mode and roaming assistant on your router, and separate your 2.4GHz and 5GHz networks.
 
 ### 2. Enable Required Interfaces
 
@@ -92,7 +92,7 @@ sudo raspi-config
 ```
 
 Enable the following:
-- Camera (libcamera)
+- Camera (libcamera) — field detector only
 - I2C
 - Serial Port — **disable serial console, keep serial hardware enabled**
 
@@ -104,43 +104,32 @@ sudo reboot
 ### 3. Clone the Repository
 
 ```bash
-git clone https://github.com/yourusername/spotpredator.git
+git clone https://github.com/JZVince/spotpredator.git
 cd spotpredator
 ```
 
-### 4. Create Virtual Environment and Install Dependencies
+### 4. Run the Setup Script
 
+A setup script handles everything — dependencies, virtual environment, data directories, systemd service, and crontab.
+
+**Field Detector:**
 ```bash
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+chmod +x scripts/setup_field.sh
+./scripts/setup_field.sh
 ```
 
-System packages also required:
+**Display Station:**
 ```bash
-sudo apt install -y python3-picamera2 i2c-tools libio-socket-ssl-perl libauthen-sasl-perl perl
+chmod +x scripts/setup_display.sh
+./scripts/setup_display.sh
 ```
 
-### 5. Configure Email (Display Station only)
+The display station script will prompt you for your Gmail address, App Password, and WiFi connection name during setup.
 
-Create a `.env` file in the `display_station/` directory:
+> To get a Gmail App Password: Google Account → Security → 2-Step Verification → App Passwords.
+> To find your WiFi connection name: `nmcli connection show`
 
-```bash
-cat > display_station/.env << 'EOF'
-EMAIL_ADDRESS=your@gmail.com
-EMAIL_PASSWORD=your_app_password
-WIFI_CONNECTION=your-nmcli-connection-name
-EOF
-```
-
-To get a Gmail App Password: Google Account → Security → 2-Step Verification → App Passwords.
-
-To find your WiFi connection name:
-```bash
-nmcli connection show
-```
-
-### 6. Configure the System
+### 5. Configure the System
 
 Edit `config.yaml` to match your setup:
 
@@ -164,7 +153,7 @@ detection:
   end_minute: 1
 ```
 
-### 7. Place Your Trained Model
+### 6. Place Your Trained Model
 
 Copy your trained TFLite model and labels to the `models/` directory:
 
@@ -181,34 +170,13 @@ poultry
 predator
 ```
 
-### 8. Set Up Auto-Start Services
-
-**Field Detector:**
-```bash
-sudo cp scripts/spotpredator.service /etc/systemd/system/
-sudo systemctl enable spotpredator
-sudo systemctl start spotpredator
-```
-
-**Display Station:**
-```bash
-sudo cp scripts/display_station.service /etc/systemd/system/
-sudo systemctl enable display_station
-sudo systemctl start display_station
-```
-
-### 9. Set Up Daily Perl Report (Display Station only)
+### 7. Reboot
 
 ```bash
-crontab -e
+sudo reboot
 ```
 
-Add:
-```
-0 22 * * * perl /home/pi/spotpredator/scripts/daily_report.pl > /home/pi/spotpredator/data/logs/perl_report.log 2>&1
-```
-
-> The cron schedule `0 22 * * *` means: minute 0, hour 22 (10:00 PM), every day.
+The systemd service will start automatically on boot.
 
 ---
 
