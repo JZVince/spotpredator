@@ -4,10 +4,10 @@ Get your predator detection system running in 30 minutes!
 
 ## What You Need
 
-✅ 2x Raspberry Pi Zero 2 W (with microSD cards)
-✅ All hardware from your shopping list
-✅ 1x NPN transistor + 1kΩ resistor (only missing item!)
-✅ Computer with SD card reader
+- 2x Raspberry Pi Zero 2 W (with microSD cards)
+- All hardware from the README shopping list
+- 1x NPN transistor + 1kΩ resistor
+- Computer with SD card reader
 
 ---
 
@@ -22,7 +22,7 @@ Get your predator detection system running in 30 minutes!
 2. Flash to SD card using Raspberry Pi Imager
    - Enable SSH
    - Set WiFi credentials
-   - Set hostname (field-detector / home-display)
+   - Set hostname (`field-detector` / `home-display`)
 
 3. Insert SD card into Pi
 
@@ -36,11 +36,9 @@ Get your predator detection system running in 30 minutes!
 # SSH into Pi
 ssh pi@field-detector.local  # or home-display.local
 
-# Clone/copy project
+# Clone project
 cd ~
-git clone <your-repo> spotpredator
-# OR: copy files via scp
-
+git clone https://github.com/JZVince/spotpredator.git spotpredator
 cd spotpredator
 
 # Run setup script
@@ -55,7 +53,28 @@ sudo reboot
 
 ---
 
-## Step 3: Hardware Wiring (15 minutes)
+## Step 3: Configure Email (Display Station only)
+
+Create a `.env` file in the `display_station/` directory:
+
+```bash
+cat > display_station/.env << 'EOF'
+EMAIL_ADDRESS=your@gmail.com
+EMAIL_PASSWORD=your_app_password
+WIFI_CONNECTION=your-nmcli-connection-name
+EOF
+```
+
+To get a Gmail App Password: Google Account → Security → 2-Step Verification → App Passwords.
+
+To find your WiFi connection name:
+```bash
+nmcli connection show
+```
+
+---
+
+## Step 4: Hardware Wiring (15 minutes)
 
 ### Field Detector
 
@@ -67,15 +86,37 @@ See [WIRING.md](WIRING.md) for details. Quick checklist:
 - [ ] Buzzer: Build transistor circuit (see WIRING.md)
 - [ ] Power: 12V battery → DC-DC converter → Pi USB
 
-### Home Display
+### Display Station
 
 - [ ] LoRa: VCC→3.3V, GND→GND, RXD→Pin8, TXD→Pin10
 - [ ] OLED: VCC→3.3V, GND→GND, SDA→Pin3, SCL→Pin5
+- [ ] Buzzer: Build transistor circuit (see WIRING.md)
 - [ ] Power: 5V USB adapter
 
 ---
 
-## Step 4: Test Components (5 minutes per Pi)
+## Step 5: Place Your Trained Model
+
+Copy your trained TFLite model and labels to the `models/` directory:
+
+```
+models/
+├── spotpredator_classifier.tflite
+└── classifier_labels.txt
+```
+
+`classifier_labels.txt` should contain one class per line:
+```
+background
+poultry
+predator
+```
+
+> Before deploying, always test your model locally with a few known images to confirm it is producing reasonable results.
+
+---
+
+## Step 6: Test Components (5 minutes per Pi)
 
 **Field Detector:**
 
@@ -83,30 +124,30 @@ See [WIRING.md](WIRING.md) for details. Quick checklist:
 cd ~/spotpredator
 
 # Test camera
-python3 scripts/test_camera.py
+python3 tests/test_camera.py
 # Should save test_camera.jpg
 
 # Test LoRa
-python3 scripts/test_lora.py
+python3 tests/test_lora.py
 # Should send test message
-
-# Test buzzer (CAREFUL!)
-python3 scripts/test_buzzer.py
-# Should hear beeps
 
 # Check I2C devices
 i2cdetect -y 1
 # Should show 0x68 (RTC)
 ```
 
-**Home Display:**
+**Display Station:**
 
 ```bash
 cd ~/spotpredator
 
 # Test LoRa
-python3 scripts/test_lora.py
+python3 tests/test_lora.py
 # Should receive message from field detector
+
+# Test email
+python3 tests/test_email.py
+# Should send a test email
 
 # Check I2C
 i2cdetect -y 1
@@ -115,44 +156,54 @@ i2cdetect -y 1
 
 ---
 
-## Step 5: Run the System!
+## Step 7: Set Up Auto-Start Services
 
-**On Field Detector:**
-
-```bash
-cd ~/spotpredator
-python3 src/main.py
-```
-
-You should see:
-```
-SpotPredator - Farm Animal Predator Detection System
-✅ All components initialized
-Starting detection loop...
-```
-
-**On Home Display:**
+**Field Detector:**
 
 ```bash
-cd ~/spotpredator
-python3 display_station/main.py
+sudo cp scripts/spotpredator.service /etc/systemd/system/
+sudo systemctl enable spotpredator
+sudo systemctl start spotpredator
 ```
 
-You should see:
+**Display Station:**
+
+```bash
+sudo cp scripts/display_station.service /etc/systemd/system/
+sudo systemctl enable display_station
+sudo systemctl start display_station
 ```
-SpotPredator - Home Display Station
-✅ LoRa initialized
-✅ OLED display initialized
-Display station running...
+
+Check status:
+
+```bash
+sudo systemctl status spotpredator       # or display_station
+sudo journalctl -u spotpredator -f       # live logs
 ```
 
 ---
 
-## Step 6: Test End-to-End
+## Step 8: Set Up Daily Perl Report (Display Station only)
 
-1. Point field detector camera at a dog/cat photo on your phone
+```bash
+crontab -e
+```
+
+Add:
+```
+0 22 * * * perl /home/pi/spotpredator/scripts/daily_report.pl > /home/pi/spotpredator/data/logs/perl_report.log 2>&1
+```
+
+> The cron schedule `0 22 * * *` means: minute 0, hour 22 (10:00 PM), every day.
+
+---
+
+## Step 9: Test End-to-End
+
+1. Point field detector camera at a predator photo on your phone
 2. Watch for detection in field detector logs
-3. Check home display - should show alert!
+3. Check display station — should show alert on OLED and sound buzzer
+4. Check your email — alert email should arrive within seconds
 
 ---
 
@@ -160,49 +211,43 @@ Display station running...
 
 ### Camera Not Working
 ```bash
-# Enable camera
 sudo raspi-config
 # Interface Options → Camera → Enable
 sudo reboot
 
-# Test
 libcamera-hello
 ```
 
 ### LoRa Not Working
 ```bash
-# Enable serial
 sudo raspi-config
 # Interface Options → Serial Port
 #   Login shell: No
 #   Serial port hardware: Yes
 sudo reboot
 
-# Check port exists
 ls -l /dev/serial0
 ```
 
 ### I2C Not Working
 ```bash
-# Enable I2C
 sudo raspi-config
 # Interface Options → I2C → Enable
 sudo reboot
 
-# Scan bus
 i2cdetect -y 1
 ```
 
 ### No Detections
-- Lower confidence threshold in config.yaml
-- Check camera view (should see clearly)
-- Test with obvious targets (photos of dogs/cats)
-- Check lighting (works best in daylight)
+- Lower confidence threshold in `config.yaml`
+- Test model locally before deploying — identical confidence scores every scan means model has collapsed
+- Check camera is capturing correctly (check `data/scans/` for saved images)
+- Check lighting — works best in daylight
 
 ### Too Many False Alarms
-- Raise confidence threshold in config.yaml
+- Raise confidence threshold in `config.yaml`
 - Adjust camera angle
-- Add ignore classes in config
+- Retrain model with more representative images
 
 ---
 
@@ -212,90 +257,28 @@ Edit `config.yaml`:
 
 ```yaml
 detector:
-  confidence_threshold: 0.65  # Lower = more sensitive
-                              # Higher = fewer false alarms
+  confidence_threshold: 0.85  # Raise to reduce false positives
 
 detection:
-  check_interval: 5  # Seconds between checks
-                     # Lower = faster response, more power
-                     # Higher = saves power
+  check_interval: 15          # Seconds between scans
+  schedule_enabled: true
+  start_hour: 6               # Start at 6:00 AM
+  end_hour: 21                # Stop at 9:01 PM
+  end_minute: 1
 
 hardware:
   lora:
-    frequency: 915  # 915 for US/Canada
-                    # 868 for Europe
+    frequency: 915            # 915 for US, 868 for EU
 ```
-
----
-
-## Running on Startup (Optional)
-
-**Create systemd service:**
-
-```bash
-# Field detector
-sudo nano /etc/systemd/system/spotpredator.service
-```
-
-```ini
-[Unit]
-Description=SpotPredator Field Detector
-After=network.target
-
-[Service]
-Type=simple
-User=pi
-WorkingDirectory=/home/pi/spotpredator
-ExecStart=/usr/bin/python3 /home/pi/spotpredator/src/main.py
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-```
-
-```bash
-# Enable and start
-sudo systemctl enable spotpredator
-sudo systemctl start spotpredator
-
-# Check status
-sudo systemctl status spotpredator
-
-# View logs
-sudo journalctl -u spotpredator -f
-```
-
-Do the same for home display with `display_station/main.py`.
-
----
-
-## Next Steps
-
-Once everything works:
-
-1. **Adjust Settings**: Tune confidence threshold based on results
-2. **Add Solar**: Connect solar panel + charge controller for 24/7 operation
-3. **Weatherproofing**: Get waterproof enclosure for field device
-4. **Test Range**: Walk around farm to verify LoRa coverage
-5. **Monitor Logs**: Check `data/logs/` for detection history
 
 ---
 
 ## Support
 
-- **Logs**: Check `data/logs/spotpredator.log`
-- **Saved Images**: See `data/detections/`
-- **Test Individual Parts**: Use test scripts in `scripts/`
-- **Wiring**: See [WIRING.md](WIRING.md) for diagrams
-- **Full Docs**: See [README.md](README.md)
-
----
-
-**Remember**: This is your first Raspberry Pi + AI project!
-
-- Start simple - get basic detection working first
-- Test each component separately
-- Don't worry about perfection
-- Adjust and improve over time
-
-Happy predator detecting! 🦅🐕🐈
+- **Logs**: `data/logs/spotpredator.log` (field) / `data/logs/display_station.log` (display)
+- **Scan Images**: `data/scans/` — labeled with class and confidence
+- **Detection Images**: `data/detections/`
+- **Field Messages**: `data/logs/field_messages.log`
+- **Daily Report**: `data/logs/daily_report.txt`
+- **Wiring**: [WIRING.md](WIRING.md)
+- **Full Docs**: [README.md](README.md)
