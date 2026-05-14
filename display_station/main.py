@@ -31,7 +31,7 @@ except ImportError:
     print("Run: pip3 install adafruit-circuitpython-ssd1306 adafruit-blinka")
     sys.exit(1)
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 
 # Buzzer (optional)
 try:

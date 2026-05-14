@@ -1,7 +1,7 @@
 """Alert Handler - Coordinates buzzer and LoRa alerts"""
 import logging
 import os
-from datetime import datetime, timedelta
+from datetime import datetime
 
 logger = logging.getLogger(__name__)
 

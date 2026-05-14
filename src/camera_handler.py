@@ -2,7 +2,6 @@
 import logging
 from picamera2 import Picamera2
 from PIL import Image
-import numpy as np
 
 logger = logging.getLogger(__name__)
 
