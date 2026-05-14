@@ -10,7 +10,7 @@ Farm animals face constant threats from hawks, eagles, foxes, coyotes, and other
 
 This is my first Raspberry Pi, computer vision, and soldering project — built from scratch with no prior hardware experience. There were cold joints, wrong pins, a buzzer that beeped all night, and a computer vision model that silently collapsed for two weeks before I caught it. I learned more from those mistakes than from anything that worked first try. The project is far from perfect — if you spot a bug, a better approach, or have suggestions, feel free to open an issue or pull request. Feedback is always welcome.
 
-The system consists of two devices:
+The system consists of two devices. Field detector code lives in `src/`, display station code lives in `display_station/`.
 
 **Field Detector** — deployed outdoors near your animals
 - Captures images every 15 seconds using a Raspberry Pi camera
