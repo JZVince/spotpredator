@@ -23,18 +23,23 @@ class CameraHandler:
     def start(self):
         """Start the camera"""
         try:
+            import time
             self.camera = Picamera2()
 
-            # Simple configuration
+            # Still configuration for best image quality
             config = self.camera.create_still_configuration(
-                main={"size": self.resolution, "format": "RGB888"}
+                main={"size": self.resolution, "format": "RGB888"},
+                controls={
+                    "AwbEnable": True,         # Auto white balance for accurate outdoor colors
+                    "NoiseReductionMode": 2,   # High quality noise reduction
+                    "AeExposureMode": 1,       # Sport mode - faster exposure, reduces light bloom
+                }
             )
             self.camera.configure(config)
             self.camera.start()
 
-            # Warm up and autofocus
-            import time
-            time.sleep(2)
+            # Warm up — gives sensor time to settle exposure and white balance
+            time.sleep(3)
             try:
                 self.camera.autofocus_cycle()
             except Exception:

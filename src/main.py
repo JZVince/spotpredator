@@ -270,11 +270,22 @@ def main():
             lora.send_message(msg2)
             time.sleep(1)
 
-            # Message 3: hourly breakdown (top hours by predator confidence)
-            hourly_str = ' '.join(f"{h}h:{sum(v)//len(v)}%" for h, v in sorted(hourly_predator.items()))
-            msg3 = f"SUMMARY3,{hourly_str}"
-            # Truncate if too long for LoRa
-            lora.send_message(msg3[:230])
+            # Message 3: hourly breakdown - split across multiple messages if needed
+            hourly_parts = [f"{h}h:{sum(v)//len(v)}%" for h, v in sorted(hourly_predator.items())]
+            chunk = []
+            chunk_size = 0
+            msg_index = 0
+            for part in hourly_parts:
+                if chunk_size + len(part) + 1 > 200:
+                    lora.send_message(f"SUMMARY3_{msg_index},{' '.join(chunk)}")
+                    time.sleep(1)
+                    chunk = []
+                    chunk_size = 0
+                    msg_index += 1
+                chunk.append(part)
+                chunk_size += len(part) + 1
+            if chunk:
+                lora.send_message(f"SUMMARY3_{msg_index},{' '.join(chunk)}")
 
             logger.info(f"📊 Summary heartbeats sent: {total} scans, peak predator {max_predator}%")
 
@@ -332,8 +343,8 @@ def main():
                         top_class = max(probs, key=probs.get)
                         label = top_class.capitalize()
                         conf = int(probs[top_class] * 100)
-                    img_name = f"{label}_{conf}%_{now_dt.strftime('%m-%d-%Y_%H-%M-%S')}.jpg"
-                    PILImage.fromarray(frame[:, :, ::-1]).save(str(scan_image_path / img_name))
+                    img_name = f"{now_dt.strftime('%Y-%m-%d_%H-%M-%S')}_{label}_{conf}%.jpg"
+                    PILImage.fromarray(frame[:, :, ::-1]).save(str(scan_image_path / img_name), quality=92)
                 except Exception as e:
                     logger.error(f"Failed to save scan image: {e}")
 
@@ -366,7 +377,7 @@ def main():
 
                 # Send daily summary heartbeats after 9:05 PM once per day
                 now_dt = rtc.get_time()
-                if now_dt.hour == 21 and now_dt.minute == 5 and summary_sent_date != now_dt.date():
+                if now_dt.hour == 21 and 5 <= now_dt.minute <= 15 and summary_sent_date != now_dt.date():
                     send_summary_heartbeats()
                     summary_sent_date = now_dt.date()
 

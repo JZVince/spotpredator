@@ -34,7 +34,12 @@ while (my $line = <$fh>) {
         push @predator_alerts, { type => $1, confidence => $2, time => $3 };
     }
     elsif ($line =~ /(SUMMARY[123]) \| (.+)/) {
-        $summary{$1} = $2;
+        # Append SUMMARY3 chunks, overwrite SUMMARY1/2
+        if ($1 eq 'SUMMARY3' && exists $summary{SUMMARY3}) {
+            $summary{SUMMARY3} .= ' ' . $2;
+        } else {
+            $summary{$1} = $2;
+        }
     }
 }
 close($fh);
@@ -46,7 +51,7 @@ if (exists $summary{SUMMARY3}) {
     }
 }
 
-# Build report
+# Build plain text report (saved to file)
 my $report = "";
 $report .= "=" x 60 . "\n";
 $report .= "SpotPredator Daily Report - $today\n";
@@ -79,7 +84,7 @@ if (@heartbeats) {
 }
 $report .= "\n";
 
-# Field scan summary from LoRa
+# Field scan summary
 $report .= "FIELD SCAN SUMMARY (via LoRa)\n";
 $report .= "-" x 40 . "\n";
 if (%summary) {
@@ -88,67 +93,137 @@ if (%summary) {
 } else {
     $report .= "No scan summary received today.\n";
 }
-$report .= "\n";
-
-# ASCII graph: hourly predator confidence
-$report .= "PREDATOR CONFIDENCE BY HOUR (ASCII Graph)\n";
-$report .= "-" x 40 . "\n";
-if (%hourly_predator) {
-    my $max_conf = 100;
-    my $bar_height = 10;  # number of rows in graph
-
-    # Get sorted hours
-    my @hours = sort { $a <=> $b } keys %hourly_predator;
-
-    # Draw graph rows from top to bottom
-    for my $row (reverse 1..$bar_height) {
-        my $threshold = ($row / $bar_height) * $max_conf;
-        my $label = sprintf("%3d%% |", int($threshold));
-        $report .= $label;
-        for my $h (@hours) {
-            my $val = $hourly_predator{$h} // 0;
-            $report .= $val >= $threshold ? "  ## " : "     ";
-        }
-        $report .= "\n";
-    }
-
-    # X axis
-    $report .= "     +" . "-" x (scalar(@hours) * 5) . "\n";
-
-    # Hour labels
-    $report .= "      ";
-    for my $h (@hours) {
-        $report .= sprintf(" %02dh ", $h);
-    }
-    $report .= "\n";
-} else {
-    $report .= "No hourly data available.\n";
-}
-
 $report .= "\n" . "=" x 60 . "\n";
 
 # Print to stdout
 print $report;
 
-# Save to file (overwrites previous)
+# Save plain text to file
 my $report_file = "/home/pi/spotpredator/data/logs/daily_report.txt";
 open(my $out, '>', $report_file) or die "Cannot write report: $!";
 print $out $report;
 close($out);
 print "Report saved to: $report_file\n";
 
+# Build HTML email
+my $html = build_html($today);
+
 # Send email
 if ($email_address && $email_password) {
-    send_email($email_address, $email_password, $today, $report);
+    send_email($email_address, $email_password, $today, $html);
 } else {
     print "Email not configured - skipping\n";
 }
 
-# Send email via Gmail SMTP SSL
-sub send_email {
-    my ($from, $password, $date, $body) = @_;
+# Build HTML email body
+sub build_html {
+    my ($date) = @_;
+    my $time = get_time();
+    my $alerts_count = scalar(@predator_alerts);
+    my $hb_count = scalar(@heartbeats);
 
-    my $subject = "SpotPredator Perl Report - $date";
+    # Alert color
+    my $header_color = $alerts_count > 0 ? '#c0392b' : '#2c7a2c';
+    my $status_text  = $alerts_count > 0 ? "$alerts_count PREDATOR ALERT(S) TODAY" : "All Clear - No Predators Detected";
+
+    # Predator alerts rows
+    my $alert_rows = '';
+    if (@predator_alerts) {
+        for my $a (@predator_alerts) {
+            my $conf_pct = int($a->{confidence} * 100);
+            $alert_rows .= "<tr><td>$a->{time}</td><td>$a->{type}</td><td>${conf_pct}%</td></tr>\n";
+        }
+    } else {
+        $alert_rows = '<tr><td colspan="3" style="color:#666;">No predator alerts today.</td></tr>';
+    }
+
+    # Heartbeat section
+    my $hb_html = '';
+    if (@heartbeats) {
+        $hb_html = "<p><strong>Received:</strong> $hb_count</p>
+        <p><strong>First:</strong> $heartbeats[0]{time} &mdash; $heartbeats[0]{status}</p>
+        <p><strong>Last:</strong> $heartbeats[-1]{time} &mdash; $heartbeats[-1]{status}</p>";
+    } else {
+        $hb_html = '<p style="color:#666;">No heartbeats received today.</p>';
+    }
+
+    # Scan summary
+    my $summary_html = '';
+    if (%summary) {
+        $summary_html .= "<p>$summary{SUMMARY1}</p>" if exists $summary{SUMMARY1};
+        $summary_html .= "<p>$summary{SUMMARY2}</p>" if exists $summary{SUMMARY2};
+    } else {
+        $summary_html = '<p style="color:#666;">No scan summary received today.</p>';
+    }
+
+    # HTML bar chart
+    my $chart_html = '';
+    if (%hourly_predator) {
+        my @hours = sort { $a <=> $b } keys %hourly_predator;
+        $chart_html .= '<table style="border-collapse:collapse;width:100%;max-width:600px;">';
+        $chart_html .= '<tr><th style="text-align:left;padding:4px;">Hour</th><th style="text-align:left;padding:4px;">Predator Confidence</th><th style="padding:4px;">%</th></tr>';
+        for my $h (@hours) {
+            my $val = $hourly_predator{$h};
+            my $bar_color = $val >= 85 ? '#c0392b' : $val >= 50 ? '#e67e22' : '#2c7a2c';
+            my $bar_width = $val * 3;  # scale to max ~300px
+            $chart_html .= "<tr>
+                <td style='padding:4px;white-space:nowrap;'>${h}:00</td>
+                <td style='padding:4px;width:100%;'>
+                    <div style='background:$bar_color;width:${bar_width}px;height:20px;border-radius:3px;'></div>
+                </td>
+                <td style='padding:4px;text-align:right;'>${val}%</td>
+            </tr>\n";
+        }
+        $chart_html .= '</table>';
+    } else {
+        $chart_html = '<p style="color:#666;">No hourly data available.</p>';
+    }
+
+    return <<HTML;
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8"></head>
+<body style="font-family:Arial,sans-serif;max-width:650px;margin:0 auto;padding:20px;color:#333;">
+
+  <div style="background:$header_color;color:white;padding:16px 20px;border-radius:6px;margin-bottom:20px;">
+    <h2 style="margin:0;">SpotPredator Daily Report</h2>
+    <p style="margin:4px 0 0;">$date &mdash; Generated at $time</p>
+  </div>
+
+  <div style="background:$header_color;color:white;padding:10px 20px;border-radius:6px;margin-bottom:20px;text-align:center;font-size:18px;font-weight:bold;">
+    $status_text
+  </div>
+
+  <h3 style="border-bottom:2px solid #ddd;padding-bottom:6px;">Predator Alerts</h3>
+  <table style="width:100%;border-collapse:collapse;">
+    <tr style="background:#f5f5f5;">
+      <th style="text-align:left;padding:8px;">Time</th>
+      <th style="text-align:left;padding:8px;">Type</th>
+      <th style="text-align:left;padding:8px;">Confidence</th>
+    </tr>
+    $alert_rows
+  </table>
+
+  <h3 style="border-bottom:2px solid #ddd;padding-bottom:6px;margin-top:24px;">Heartbeats</h3>
+  $hb_html
+
+  <h3 style="border-bottom:2px solid #ddd;padding-bottom:6px;margin-top:24px;">Field Scan Summary</h3>
+  $summary_html
+
+  <h3 style="border-bottom:2px solid #ddd;padding-bottom:6px;margin-top:24px;">Predator Confidence by Hour</h3>
+  $chart_html
+
+  <p style="margin-top:30px;font-size:12px;color:#999;">SpotPredator &mdash; Farm Predator Detection System</p>
+</body>
+</html>
+HTML
+}
+
+# Send HTML email via Gmail SMTP SSL
+sub send_email {
+    my ($from, $password, $date, $html_body) = @_;
+
+    my $subject = "SpotPredator Report - $date";
     my $alerts  = scalar(@predator_alerts);
     $subject   .= " - $alerts alert(s)" if $alerts > 0;
 
@@ -166,12 +241,13 @@ sub send_email {
         $smtp->mail($from);
         $smtp->to($from);
         $smtp->data();
-        $smtp->datasend("From: $from\n");
-        $smtp->datasend("To: $from\n");
-        $smtp->datasend("Subject: $subject\n");
-        $smtp->datasend("Content-Type: text/plain; charset=UTF-8\n");
-        $smtp->datasend("\n");
-        $smtp->datasend($body);
+        $smtp->datasend("From: $from\r\n");
+        $smtp->datasend("To: $from\r\n");
+        $smtp->datasend("Subject: $subject\r\n");
+        $smtp->datasend("MIME-Version: 1.0\r\n");
+        $smtp->datasend("Content-Type: text/html; charset=UTF-8\r\n");
+        $smtp->datasend("\r\n");
+        $smtp->datasend($html_body);
         $smtp->dataend();
         $smtp->quit();
 

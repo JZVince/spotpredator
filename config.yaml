@@ -2,7 +2,7 @@
 # Simple configuration for your first Raspberry Pi + AI project
 
 camera:
-  resolution: [640, 480]  # Keep it moderate for Pi Zero 2 W
+  resolution: [1920, 1080]  # Higher resolution for better training image quality
   framerate: 15
   rotation: 0  # Adjust if camera is mounted upside down
 

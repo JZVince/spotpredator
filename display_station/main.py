@@ -72,6 +72,7 @@ detection_logger.addHandler(detection_handler)
 # Field messages log - all incoming LoRa messages from field Pi
 field_logger = logging.getLogger('field_messages')
 field_logger.setLevel(logging.INFO)
+field_logger.propagate = False
 field_handler = logging.FileHandler('data/logs/field_messages.log')
 field_handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s'))
 field_logger.addHandler(field_handler)
@@ -235,12 +236,16 @@ class DisplayStation:
                         'date': parts[4] if len(parts) > 4 else ''
                     }
 
-            # Format: SUMMARY1/2/3,<data>
+            # Format: SUMMARY1/2/3_chunk,<data>
             if message.startswith("SUMMARY"):
                 parts = message.split(',', 1)
                 if len(parts) == 2:
+                    msg_type = parts[0]  # e.g. SUMMARY1, SUMMARY3_0, SUMMARY3_1
+                    # Normalize SUMMARY3_N chunks into SUMMARY3
+                    if msg_type.startswith("SUMMARY3_"):
+                        msg_type = "SUMMARY3"
                     return {
-                        'type': parts[0],  # SUMMARY1, SUMMARY2, or SUMMARY3
+                        'type': msg_type,
                         'data': parts[1]
                     }
 
@@ -278,7 +283,11 @@ class DisplayStation:
                                 detection_logger.info(f"HEARTBEAT | {alert['status']} | {alert['time']}")
                                 field_logger.info(f"HEARTBEAT | {alert['status']} | {alert['time']}")
                             elif alert['type'] in ('SUMMARY1', 'SUMMARY2', 'SUMMARY3'):
-                                self.summary_stats[alert['type']] = alert['data']
+                                if alert['type'] == 'SUMMARY3' and alert['type'] in self.summary_stats:
+                                    # Append chunks for SUMMARY3
+                                    self.summary_stats['SUMMARY3'] += ' ' + alert['data']
+                                else:
+                                    self.summary_stats[alert['type']] = alert['data']
                                 logger.info(f"📊 {alert['type']} received: {alert['data']}")
                                 field_logger.info(f"{alert['type']} | {alert['data']}")
                             else:
