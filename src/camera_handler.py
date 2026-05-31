@@ -32,7 +32,7 @@ class CameraHandler:
                 controls={
                     "AwbEnable": True,         # Auto white balance for accurate outdoor colors
                     "NoiseReductionMode": 2,   # High quality noise reduction
-                    "AeExposureMode": 1,       # Sport mode - faster exposure, reduces light bloom
+                    "Sharpness": 2.0,          # Increase sharpness (default is 1.0)
                 }
             )
             self.camera.configure(config)

@@ -312,9 +312,27 @@ def main():
                             buzzer.beep(count=2, beep_duration=0.1, pause_duration=0.1)
                     last_schedule_status = is_active
 
-                # If outside schedule, just sleep and check again
+                # If outside schedule, send summary if due then sleep until next active period
                 if not is_active:
-                    time.sleep(60)  # Check every minute if we're back in schedule
+                    from datetime import timedelta
+                    now_dt = rtc.get_time()
+
+                    # Send summary if within the 21:05-21:15 window
+                    if now_dt.hour == 21 and 5 <= now_dt.minute <= 15 and summary_sent_date != now_dt.date():
+                        send_summary_heartbeats()
+                        summary_sent_date = now_dt.date()
+
+                    # Wait in short intervals until summary window has passed, then sleep until 6AM
+                    if now_dt.hour == 21 and now_dt.minute < 16:
+                        time.sleep(60)  # Still in or before summary window, check every minute
+                    else:
+                        # Summary window passed, sleep precisely until next 6:00 AM
+                        next_start = now_dt.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+                        if now_dt >= next_start:
+                            next_start += timedelta(days=1)
+                        sleep_seconds = (next_start - now_dt).total_seconds()
+                        logger.info(f"💤 Sleeping until {next_start.strftime('%H:%M')} ({int(sleep_seconds/3600)}h {int((sleep_seconds%3600)/60)}m)")
+                        time.sleep(sleep_seconds)
                     continue
 
                 # Within schedule - do detection
@@ -375,11 +393,6 @@ def main():
                         send_heartbeat()
                         hb['last_minute'] = now_minute
 
-                # Send daily summary heartbeats after 9:05 PM once per day
-                now_dt = rtc.get_time()
-                if now_dt.hour == 21 and 5 <= now_dt.minute <= 15 and summary_sent_date != now_dt.date():
-                    send_summary_heartbeats()
-                    summary_sent_date = now_dt.date()
 
                 # Weekly cleanup: delete all scan images every Monday at 6:00 AM
                 now_dt = rtc.get_time()
