@@ -6,7 +6,7 @@ use Net::SMTP;
 
 # SpotPredator Daily Report
 # Reads field_messages.log from display station and generates a summary report
-# Run daily at 10:00 PM via cron: 0 22 * * * perl /home/pi/spotpredator/scripts/daily_report.pl
+# Run daily at 9:16 PM via cron: 16 21 * * * perl /home/pi/spotpredator/scripts/daily_report.pl
 
 my $log_file  = "/home/pi/spotpredator/data/logs/field_messages.log";
 my $env_file  = "/home/pi/spotpredator/display_station/.env";

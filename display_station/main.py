@@ -490,10 +490,7 @@ class DisplayStation:
                 else:
                     self.show_waiting()
 
-                # Send daily email at 9:15PM
                 now = datetime.now()
-                if now.hour == 21 and now.minute == 15 and self.last_email_date != date.today():
-                    self.send_daily_email()
 
                 # WiFi keepalive ping every 10 minutes
                 if time.time() - self.last_keepalive_time >= 600:

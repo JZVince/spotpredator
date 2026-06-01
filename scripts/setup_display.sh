@@ -93,8 +93,8 @@ echo "Service installed and enabled (will start on next boot)"
 
 # Step 8: Set up daily Perl report cron job
 echo ""
-echo "Step 8: Setting up daily Perl report (10:00 PM cron job)..."
-CRON_JOB="0 22 * * * perl $INSTALL_DIR/scripts/daily_report.pl > $INSTALL_DIR/data/logs/perl_report.log 2>&1"
+echo "Step 8: Setting up daily Perl report (9:16 PM cron job)..."
+CRON_JOB="16 21 * * * perl $INSTALL_DIR/scripts/daily_report.pl > $INSTALL_DIR/data/logs/perl_report.log 2>&1"
 # Add only if not already present
 if crontab -l 2>/dev/null | grep -q "daily_report.pl"; then
     echo "Cron job already exists, skipping."

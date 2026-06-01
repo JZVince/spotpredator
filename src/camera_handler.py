@@ -26,13 +26,12 @@ class CameraHandler:
             import time
             self.camera = Picamera2()
 
-            # Still configuration for best image quality
-            config = self.camera.create_still_configuration(
+            config = self.camera.create_preview_configuration(
                 main={"size": self.resolution, "format": "RGB888"},
                 controls={
-                    "AwbEnable": True,         # Auto white balance for accurate outdoor colors
-                    "NoiseReductionMode": 2,   # High quality noise reduction
-                    "Sharpness": 2.0,          # Increase sharpness (default is 1.0)
+                    "AwbEnable": True,
+                    "NoiseReductionMode": 2,
+                    "Sharpness": 2.0,
                 }
             )
             self.camera.configure(config)
