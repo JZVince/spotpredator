@@ -26,12 +26,20 @@ class CameraHandler:
             import time
             self.camera = Picamera2()
 
-            config = self.camera.create_preview_configuration(
+            config = self.camera.create_still_configuration(
                 main={"size": self.resolution, "format": "RGB888"},
                 controls={
+                    "AeEnable": True,
+                    "AeExposureMode": 0,
+                    "AeMeteringMode": 0,
                     "AwbEnable": True,
+                    "Brightness": 0.1,
+                    "Contrast": 1.0,
+                    "Saturation": 1.0,
+                    "Sharpness": 1.0,
                     "NoiseReductionMode": 2,
-                    "Sharpness": 2.0,
+                    "AfMode": 0,
+                    "LensPosition": 0.0,
                 }
             )
             self.camera.configure(config)
@@ -39,10 +47,6 @@ class CameraHandler:
 
             # Warm up — gives sensor time to settle exposure and white balance
             time.sleep(3)
-            try:
-                self.camera.autofocus_cycle()
-            except Exception:
-                pass  # Autofocus not available on all cameras
 
             logger.info("Camera started successfully")
             return True
@@ -59,9 +63,10 @@ class CameraHandler:
             numpy array: Image as RGB array, or None if capture fails
         """
         try:
-            # Capture frame as numpy array
-            frame = self.camera.capture_array()
-            return frame
+            # capture_image does a full AE/AWB settle before each shot
+            import numpy as np
+            frame = np.array(self.camera.capture_image("main"))
+            return frame[:, :, ::-1]  # RGB to BGR to match capture_array() format
 
         except Exception as e:
             logger.error(f"Failed to capture frame: {e}")

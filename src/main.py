@@ -26,7 +26,7 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(name)s | %(message)s',
     handlers=[
-        logging.FileHandler('data/logs/spotpredator.log'),
+        logging.FileHandler('data/logs/spotpredator.log', mode='a'),
         logging.StreamHandler()
     ]
 )
@@ -36,7 +36,7 @@ logger = logging.getLogger(__name__)
 # Scan confidence logger
 scan_logger = logging.getLogger('scans')
 scan_logger.setLevel(logging.INFO)
-scan_handler = logging.FileHandler('data/logs/scan_confidence.log')
+scan_handler = logging.FileHandler('data/logs/scan_confidence.log', mode='a')
 scan_handler.setFormatter(logging.Formatter('%(asctime)s | %(message)s'))
 scan_logger.addHandler(scan_handler)
 
@@ -405,6 +405,12 @@ def main():
                         except Exception as e:
                             logger.error(f"Failed to delete scan image {f}: {e}")
                     logger.info(f"🗑️  Weekly cleanup: deleted {deleted} scan images")
+                    for log_file in ['data/logs/spotpredator.log', 'data/logs/scan_confidence.log', 'data/logs/wifi_reconnect.log']:
+                        try:
+                            open(log_file, 'w').close()
+                        except Exception as e:
+                            logger.error(f"Failed to clear log {log_file}: {e}")
+                    logger.info("🗑️  Weekly cleanup: logs cleared")
                     last_weekly_cleanup = now_dt.date()
 
                 # Monthly cleanup: delete detection images older than 30 days

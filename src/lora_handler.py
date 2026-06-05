@@ -41,7 +41,7 @@ class LoRaHandler:
                 timeout=2
             )
 
-            time.sleep(0.5)  # Wait for module to be ready
+            time.sleep(3)  # Wait for module to be ready on cold boot
 
             # Test communication
             response = self._send_command("AT")

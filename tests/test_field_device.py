@@ -48,13 +48,16 @@ try:
         frame = cam.capture_frame()
         if frame is not None:
             check("Camera start", PASS, f"Frame shape: {frame.shape}")
-            # Check frame is not all zeros (blank image)
             import numpy as np
+            from PIL import Image as PILImage
             mean = frame.mean()
             if mean > 5:
                 check("Frame content", PASS, f"Mean pixel: {mean:.1f}")
             else:
                 check("Frame content", FAIL, "Frame appears blank/black")
+            save_path = "data/scans/test_capture.jpg"
+            PILImage.fromarray(frame[:, :, ::-1]).save(save_path, quality=92)
+            check("Test image saved", PASS, save_path)
         else:
             check("Camera capture", FAIL, "capture_frame() returned None")
         cam.stop()
