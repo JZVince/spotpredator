@@ -500,7 +500,7 @@ class DisplayStation:
                 # Monthly log cleanup: 1st of month at midnight
                 today = date.today()
                 if today.day == 1 and now.hour == 0 and now.minute == 0 and self.last_log_cleanup_month != today.month:
-                    for log_file in ['data/logs/display_station.log', 'data/logs/display_detections.log']:
+                    for log_file in ['data/logs/display_station.log', 'data/logs/display_detections.log', 'data/logs/wifi_reconnect.log']:
                         if os.path.exists(log_file):
                             with open(log_file, 'w'):
                                 pass

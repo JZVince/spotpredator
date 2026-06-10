@@ -304,6 +304,9 @@ def main():
                 if is_active != last_schedule_status:
                     if is_active:
                         logger.info("⏰ Entering active detection hours - MONITORING ACTIVE")
+                        camera.stop()
+                        camera.start()
+                        logger.info("📷 Camera reinitialized after sleep")
                         if buzzer.gpio_available:
                             buzzer.beep(count=1, beep_duration=0.1)
                     else:
@@ -396,7 +399,7 @@ def main():
 
                 # Weekly cleanup: delete all scan images every Monday at 6:00 AM
                 now_dt = rtc.get_time()
-                if now_dt.weekday() == 0 and now_dt.hour == 6 and now_dt.minute == 0 and last_weekly_cleanup != now_dt.date():
+                if now_dt.weekday() == 0 and now_dt.hour == start_hour and now_dt.minute == start_minute and last_weekly_cleanup != now_dt.date():
                     deleted = 0
                     for f in scan_image_path.glob('*.jpg'):
                         try:

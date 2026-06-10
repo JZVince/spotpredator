@@ -45,7 +45,7 @@ detection:
 
   # Schedule: Only detect during these hours
   schedule_enabled: true  # Set to false to run 24/7
-  start_hour: 6  # Start detection at 6:00 AM
-  start_minute: 0
+  start_hour: 6  # Start detection at 6:30 AM
+  start_minute: 30
   end_hour: 21  # End detection at 9:01 PM (21:00)
   end_minute: 1

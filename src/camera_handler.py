@@ -29,17 +29,10 @@ class CameraHandler:
             config = self.camera.create_still_configuration(
                 main={"size": self.resolution, "format": "RGB888"},
                 controls={
-                    "AeEnable": True,
-                    "AeExposureMode": 0,
-                    "AeMeteringMode": 0,
                     "AwbEnable": True,
-                    "Brightness": 0.1,
-                    "Contrast": 1.0,
-                    "Saturation": 1.0,
-                    "Sharpness": 1.0,
                     "NoiseReductionMode": 2,
-                    "AfMode": 0,
-                    "LensPosition": 0.0,
+                    "Sharpness": 2.0,
+                    "AeExposureMode": 1,
                 }
             )
             self.camera.configure(config)
@@ -63,10 +56,8 @@ class CameraHandler:
             numpy array: Image as RGB array, or None if capture fails
         """
         try:
-            # capture_image does a full AE/AWB settle before each shot
-            import numpy as np
-            frame = np.array(self.camera.capture_image("main"))
-            return frame[:, :, ::-1]  # RGB to BGR to match capture_array() format
+            frame = self.camera.capture_array()
+            return frame
 
         except Exception as e:
             logger.error(f"Failed to capture frame: {e}")
