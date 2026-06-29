@@ -7,14 +7,14 @@ camera:
   rotation: 0  # Adjust if camera is mounted upside down
 
 detector:
-  model_path: "models/spotpredator_classifier.tflite"
-  labels_path: "models/classifier_labels.txt"
-  confidence_threshold: 0.85  # 85% confidence required for alert
+  model_path: "models/predator_v2_fp16.tflite"
+  labels_path: "models/labels.txt"
+  confidence_threshold: 0.7
   target_classes:
-    - predator
-  ignore_classes:
-    - background
-    - poultry
+    - coyote
+    - fox
+    - raptor
+  ignore_classes: []
 
 hardware:
   camera:
@@ -31,6 +31,11 @@ hardware:
   buzzer:
     gpio_pin: 27
     duration_seconds: 3
+  stepper:
+    enabled: true
+    pins: [5, 6, 13, 19]  # ULN2003 IN1-IN4 (BCM)
+    positions: 6  # Scan positions around the circle (60 deg apart)
+    step_delay: 0.0015  # Seconds between steps
 
 alerts:
   buzzer_enabled: false
@@ -40,7 +45,7 @@ alerts:
   log_path: "data/logs/detections.log"
 
 detection:
-  check_interval: 15  # Seconds between each check
+  check_interval: 20  # Seconds between each check
   cooldown_period: 180  # Wait 3 minutes before alerting again for same animal type
 
   # Schedule: Only detect during these hours

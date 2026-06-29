@@ -11,6 +11,7 @@ venv/
 # Data
 data/logs/
 data/detections/
+data/detections_clean/
 data/scans/
 
 # Models (large files)
@@ -18,6 +19,9 @@ models/*.tflite
 
 # Project log
 PROJECT_LOG.txt
+
+# Conference paper (draft)
+PAPER.md
 
 # Mac
 .DS_Store

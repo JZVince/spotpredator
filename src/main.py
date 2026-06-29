@@ -9,7 +9,8 @@ import yaml
 import sys
 import os
 from pathlib import Path
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
+from PIL import Image as PILImage, ImageDraw
 
 # Add src directory to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -20,6 +21,7 @@ from rtc_handler import RTCHandler
 from buzzer_handler import BuzzerHandler
 from lora_handler import LoRaHandler
 from alert_handler import AlertHandler
+from stepper_handler import StepperHandler
 
 # Setup logging
 logging.basicConfig(
@@ -101,6 +103,16 @@ def main():
             frequency=lora_config.get('frequency', 915)
         )
 
+        # Stepper (camera rotation)
+        stepper_config = config.get('hardware', {}).get('stepper', {})
+        stepper = None
+        if stepper_config.get('enabled', False):
+            stepper = StepperHandler(
+                pins=tuple(stepper_config.get('pins', [5, 6, 13, 19])),
+                positions=stepper_config.get('positions', 6),
+                step_delay=stepper_config.get('step_delay', 0.0015)
+            )
+
         # Alert handler
         alert_handler = AlertHandler(buzzer, lora, rtc, config)
 
@@ -134,7 +146,7 @@ def main():
     target_classes = config.get('detector', {}).get('target_classes', ['dog', 'cat', 'bird'])
 
     # Heartbeat tracking
-    hb = {'last_minute': -1, 'predator_type': None, 'predator_time': None}
+    hb = {'last_minute': -1, 'predator_type': None, 'predator_time': None, 'predator_conf': None}
 
     # Image cleanup tracking
     last_cleanup_month = None
@@ -143,6 +155,11 @@ def main():
     # Scan image path
     scan_image_path = Path('data/scans/')
     scan_image_path.mkdir(parents=True, exist_ok=True)
+    clean_detection_path = Path('data/detections_clean/')
+    clean_detection_path.mkdir(parents=True, exist_ok=True)
+    scan_save_counter = 0
+    scan_save_every = 5  # Save scan images every 5th cycle
+    scan_cycle_count = 0  # Track total scan cycles for nightly summary
 
     # Schedule settings
     schedule_enabled = config.get('detection', {}).get('schedule_enabled', False)
@@ -164,27 +181,23 @@ def main():
     logger.info("Starting detection loop... (Press Ctrl+C to stop)")
     logger.info("")
 
+    from datetime import time as dt_time
+    _start_time = dt_time(start_hour, start_minute)
+    _end_time = dt_time(end_hour, end_minute)
+
     def is_within_schedule():
         """Check if current time is within active detection hours"""
         if not schedule_enabled:
             return True
-
-        from datetime import datetime, time as dt_time
-
-        now = rtc.get_time()
-        current_time = now.time()
-
-        start_time = dt_time(start_hour, start_minute)
-        end_time = dt_time(end_hour, end_minute)
-
-        return start_time <= current_time <= end_time
+        return _start_time <= rtc.get_time().time() <= _end_time
 
     def send_heartbeat():
         """Send heartbeat LoRa message every 30 minutes"""
         now = rtc.get_time()
         if hb['predator_time'] and (time.time() - hb['predator_time']) < 600:
             minutes_ago = int((time.time() - hb['predator_time']) / 60)
-            msg = f"HEARTBEAT,{hb['predator_type']} seen {minutes_ago} min ago,{now.strftime('%H:%M')}"
+            conf = hb['predator_conf'] or 0
+            msg = f"HEARTBEAT,{hb['predator_type']}_{conf}% seen {minutes_ago}min ago,{now.strftime('%H:%M')}"
         else:
             msg = f"HEARTBEAT,Field is clear,{now.strftime('%H:%M')}"
         lora.send_message(msg)
@@ -199,13 +212,14 @@ def main():
             today = date.today().strftime("%Y-%m-%d")
             log_path = "data/logs/scan_confidence.log"
 
-            total = 0
-            bg_sum = poultry_sum = predator_sum = 0
-            max_predator = 0
-            max_predator_time = ""
-            notable = 0  # scans where predator > 50%
+            total = scan_cycle_count
+            detection_count = 0
+            max_conf = 0
+            max_conf_class = ""
+            max_conf_time = ""
+            notable = 0  # scans where any detection > 50%
 
-            hourly_predator = {}  # hour -> list of predator confidences
+            hourly_detections = {}  # hour -> count of detections
 
             if os.path.exists(log_path):
                 with open(log_path, 'r', encoding='utf-8', errors='ignore') as f:
@@ -213,41 +227,30 @@ def main():
                         if today not in line:
                             continue
                         try:
-                            # Parse time
                             time_str = line.split(' ')[1][:5]  # HH:MM
                             hour = int(time_str.split(':')[0])
 
-                            # Parse confidences: "background:66% | poultry:10% | predator:23%"
-                            parts = line.split('|')
-                            conf = {}
-                            for p in parts:
-                                p = p.strip()
-                                if ':' in p and '%' in p:
-                                    # handle "2026-05-04 16:15:21,580 | INFO | scans | background:66%..."
-                                    seg = p.split()[-1] if ' ' in p else p
-                                    if ':' in seg and '%' in seg:
-                                        k, v = seg.split(':')
-                                        conf[k.strip()] = int(v.replace('%', ''))
-
-                            if not conf:
+                            if 'no_detection' in line:
                                 continue
 
-                            total += 1
-                            bg_sum += conf.get('background', 0)
-                            poultry_sum += conf.get('poultry', 0)
-                            pred_conf = conf.get('predator', 0)
-                            predator_sum += pred_conf
-
-                            if pred_conf > max_predator:
-                                max_predator = pred_conf
-                                max_predator_time = time_str
-
-                            if pred_conf >= 50:
-                                notable += 1
-
-                            if hour not in hourly_predator:
-                                hourly_predator[hour] = []
-                            hourly_predator[hour].append(pred_conf)
+                            # Count detections from all tiles
+                            parts = line.split('|')
+                            for p in parts:
+                                p = p.strip()
+                                seg = p.split()[-1] if ' ' in p else p
+                                if ':' in seg and '%' in seg:
+                                    k, v = seg.split(':')
+                                    conf_val = int(v.replace('%', ''))
+                                    detection_count += 1
+                                    if conf_val >= 50:
+                                        notable += 1
+                                    if conf_val > max_conf:
+                                        max_conf = conf_val
+                                        max_conf_class = k.strip()
+                                        max_conf_time = time_str
+                                    if hour not in hourly_detections:
+                                        hourly_detections[hour] = 0
+                                    hourly_detections[hour] += 1
 
                         except Exception:
                             continue
@@ -256,22 +259,18 @@ def main():
                 lora.send_message("SUMMARY,No scan data for today")
                 return
 
-            avg_bg = bg_sum // total
-            avg_poultry = poultry_sum // total
-            avg_predator = predator_sum // total
-
             # Message 1: overall stats
-            msg1 = f"SUMMARY1,Scans:{total} Avg bg:{avg_bg}% poultry:{avg_poultry}% predator:{avg_predator}%"
+            msg1 = f"SUMMARY1,Scans:{total} Detections:{detection_count} Notable(>50%):{notable}"
             lora.send_message(msg1)
             time.sleep(1)
 
-            # Message 2: peak predator
-            msg2 = f"SUMMARY2,Peak predator:{max_predator}% at {max_predator_time} | Notable(>50%):{notable}"
+            # Message 2: peak detection
+            msg2 = f"SUMMARY2,Peak:{max_conf_class} {max_conf}% at {max_conf_time}"
             lora.send_message(msg2)
             time.sleep(1)
 
             # Message 3: hourly breakdown - split across multiple messages if needed
-            hourly_parts = [f"{h}h:{sum(v)//len(v)}%" for h, v in sorted(hourly_predator.items())]
+            hourly_parts = [f"{h}h:{v}" for h, v in sorted(hourly_detections.items())]
             chunk = []
             chunk_size = 0
             msg_index = 0
@@ -287,13 +286,13 @@ def main():
             if chunk:
                 lora.send_message(f"SUMMARY3_{msg_index},{' '.join(chunk)}")
 
-            logger.info(f"📊 Summary heartbeats sent: {total} scans, peak predator {max_predator}%")
+            logger.info(f"📊 Summary heartbeats sent: {total} scans, peak {max_conf_class} {max_conf}%")
 
         except Exception as e:
             logger.error(f"Failed to send summary heartbeats: {e}")
 
-    # Main loop
-    last_schedule_status = None
+    # Main loop — initialize to current schedule state to avoid spurious reinit on first iteration
+    last_schedule_status = is_within_schedule()
     try:
         while True:
             try:
@@ -317,7 +316,6 @@ def main():
 
                 # If outside schedule, send summary if due then sleep until next active period
                 if not is_active:
-                    from datetime import timedelta
                     now_dt = rtc.get_time()
 
                     # Send summary if within the 21:05-21:15 window
@@ -339,66 +337,100 @@ def main():
                     continue
 
                 # Within schedule - do detection
-                # Capture frame
-                frame = camera.capture_frame()
+                # Capture three 640x640 tiles
+                tiles = camera.capture_frame()
 
-                if frame is None:
+                if tiles is None:
                     logger.warning("Failed to capture frame, retrying...")
                     time.sleep(1)
                     continue
 
-                # Run detection
-                detections = detector.detect_predators(frame, predator_classes=target_classes)
+                now_dt = rtc.get_time()
+                pos = stepper.current_position if stepper else 0
+                tile_names = [f'P{pos}L', f'P{pos}M', f'P{pos}R']
+                new_alert = False
+                alerted_this_cycle = set()
+                scan_save_counter += 1
+                scan_cycle_count += 1
+                should_save_scan = (scan_save_counter % scan_save_every == 0)
 
-                # Log all class probabilities and save scanned image
-                try:
-                    from PIL import Image as PILImage
-                    now_dt = rtc.get_time()
-                    probs = detector.get_all_probabilities(frame)
-                    prob_str = ' | '.join(f"{k}:{int(v*100)}%" for k, v in probs.items())
-                    scan_logger.info(prob_str)
+                for tile_idx, frame in enumerate(tiles):
+                    # Run detection on this tile
+                    detections = detector.detect_predators(frame, predator_classes=target_classes)
+
+                    # Log detections and save scanned image
+                    try:
+                        if detections:
+                            label = detections[0]['class'].capitalize()
+                            conf = int(detections[0]['confidence'] * 100)
+                            det_str = ' | '.join(f"{d['class']}:{int(d['confidence']*100)}%" for d in detections)
+                            scan_logger.info(f"tile={tile_names[tile_idx]} | {det_str}")
+                        else:
+                            label = 'Background'
+                            conf = 0
+                        if should_save_scan:
+                            img_name = f"{now_dt.strftime('%Y-%m-%d_%H-%M-%S')}_{tile_names[tile_idx]}_{label}_{conf}%.jpg"
+                            PILImage.fromarray(frame[:, :, ::-1]).save(str(scan_image_path / img_name), quality=92)
+                    except Exception as e:
+                        logger.error(f"Failed to save scan image: {e}")
+
                     if detections:
-                        label = detections[0]['class'].capitalize()
-                        conf = int(detections[0]['confidence'] * 100)
-                    else:
-                        top_class = max(probs, key=probs.get)
-                        label = top_class.capitalize()
-                        conf = int(probs[top_class] * 100)
-                    img_name = f"{now_dt.strftime('%Y-%m-%d_%H-%M-%S')}_{label}_{conf}%.jpg"
-                    PILImage.fromarray(frame[:, :, ::-1]).save(str(scan_image_path / img_name), quality=92)
-                except Exception as e:
-                    logger.error(f"Failed to save scan image: {e}")
+                        timestamp_str = now_dt.strftime('%Y-%m-%d_%H-%M-%S')
+                        tile_tag = tile_names[tile_idx]
+                        top = detections[0]
+                        img_base = f"{timestamp_str}_{tile_tag}_{top['class']}_{int(top['confidence']*100)}%"
 
-                if detections:
-                    # Found predators!
-                    new_alert = False
-                    for detection in detections:
-                        logger.info(f"🎯 Detected: {detection['class']} "
-                                    f"(confidence: {detection['confidence']:.2f})")
+                        # Save clean image — all detections, no annotation
+                        try:
+                            PILImage.fromarray(frame[:, :, ::-1]).save(
+                                str(clean_detection_path / f"{img_base}.jpg"), quality=92)
+                        except Exception as e:
+                            logger.error(f"Failed to save clean detection image: {e}")
 
-                        # Track last predator for heartbeat
-                        hb['predator_type'] = detection['class']
-                        hb['predator_time'] = time.time()
+                        # Save annotated image — all boxes and labels on one image
+                        try:
+                            annotated = PILImage.fromarray(frame[:, :, ::-1])
+                            draw = ImageDraw.Draw(annotated)
+                            for d in detections:
+                                if 'box' in d:
+                                    box = d['box']
+                                    scale = 640 if max(box) <= 1.0 else 1
+                                    x1, y1, x2, y2 = [int(v * scale) for v in box]
+                                    draw.rectangle([x1, y1, x2, y2], outline='red', width=2)
+                                    draw.text((x1, max(y1 - 10, 0)), f"{d['class']} {int(d['confidence']*100)}%", fill='red')
+                            annotated.save(str(Path(alert_handler.image_path) / f"{img_base}.jpg"), quality=92)
+                        except Exception as e:
+                            logger.error(f"Failed to save annotated detection image: {e}")
 
-                        # Send alert (returns True if not in cooldown)
-                        if alert_handler.send_alert(detection, image=frame):
-                            new_alert = True
+                        for detection in detections:
+                            logger.info(f"🎯 [{tile_tag}] Detected: {detection['class']} "
+                                        f"(confidence: {detection['confidence']:.2f})")
 
-                    # Send immediate heartbeat on new alert so display updates right away
-                    if new_alert:
-                        send_heartbeat()
-                        hb['last_minute'] = rtc.get_time().minute
+                            # Track last predator for heartbeat
+                            hb['predator_type'] = detection['class']
+                            hb['predator_time'] = time.time()
+                            hb['predator_conf'] = int(detection['confidence'] * 100)
+
+                            # Only send alert once per predator class per scan cycle
+                            if detection['class'] not in alerted_this_cycle:
+                                if alert_handler.send_alert(detection, image=None):
+                                    new_alert = True
+                                    alerted_this_cycle.add(detection['class'])
+
+                # Send immediate heartbeat on new alert so display updates right away
+                now_dt = rtc.get_time()
+                if new_alert:
+                    send_heartbeat()
+                    hb['last_minute'] = now_dt.minute
 
                 # Check if heartbeat is due (every :00 or :30), only during active hours
                 if is_active:
-                    now_minute = rtc.get_time().minute
+                    now_minute = now_dt.minute
                     if now_minute in (0, 30) and now_minute != hb['last_minute']:
                         send_heartbeat()
                         hb['last_minute'] = now_minute
 
-
-                # Weekly cleanup: delete all scan images every Monday at 6:00 AM
-                now_dt = rtc.get_time()
+                # Weekly cleanup: delete all scan images every Monday at start time
                 if now_dt.weekday() == 0 and now_dt.hour == start_hour and now_dt.minute == start_minute and last_weekly_cleanup != now_dt.date():
                     deleted = 0
                     for f in scan_image_path.glob('*.jpg'):
@@ -417,8 +449,7 @@ def main():
                     last_weekly_cleanup = now_dt.date()
 
                 # Monthly cleanup: delete detection images older than 30 days
-                # Runs on the 1st of each month
-                today = rtc.get_time().date()
+                today = now_dt.date()
                 if today.day == 1 and today.month != last_cleanup_month:
                     image_path = config.get('alerts', {}).get('image_path', 'data/detections/')
                     deleted = 0
@@ -432,6 +463,10 @@ def main():
                             logger.error(f"Failed to delete detection image {f}: {e}")
                     logger.info(f"🗑️  Monthly cleanup: deleted {deleted} detection images older than 30 days")
                     last_cleanup_month = today.month
+
+                # Rotate camera to next scan position for the next cycle
+                if stepper:
+                    stepper.next_position()
 
                 # Wait before next check
                 time.sleep(check_interval)
@@ -454,6 +489,8 @@ def main():
         camera.stop()
         buzzer.cleanup()
         lora.cleanup()
+        if stepper:
+            stepper.cleanup()
         logger.info("✅ Shutdown complete")
 
 

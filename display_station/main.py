@@ -160,20 +160,31 @@ class DisplayStation:
         image = Image.new("1", (128, 64))
         draw = ImageDraw.Draw(image)
 
-        draw.text((5, 2), "SpotPredator", fill=255)  # yellow zone: 0-15
+        # Line 1 (y=2): title
+        draw.text((5, 2), "SpotPredator", fill=255)
 
+        # Lines 2-4 (y=18,30,42): status split into 18-char chunks
         status = self.last_heartbeat_status or "Waiting..."
-        # Word wrap if too long
-        if len(status) > 18:
-            draw.text((5, 18), status[:18], fill=255)
-            draw.text((5, 30), status[18:], fill=255)
-        else:
-            draw.text((5, 18), status, fill=255)
+        words = status.split()
+        lines = []
+        current = ""
+        for word in words:
+            if len(current) + len(word) + (1 if current else 0) <= 18:
+                current += (" " if current else "") + word
+            else:
+                lines.append(current)
+                current = word
+        if current:
+            lines.append(current)
 
-        heartbeat_time = f"Last: {self.last_heartbeat_time}" if self.last_heartbeat_time else ""
-        draw.text((5, 42), heartbeat_time, fill=255)
+        y_positions = [18, 30, 42]
+        for i, line in enumerate(lines[:3]):
+            draw.text((5, y_positions[i]), line, fill=255)
 
+        # Line 5 (y=54): last heartbeat time + current time
+        heartbeat_time = self.last_heartbeat_time or ""
         current_time = datetime.now().strftime("%H:%M")
+        draw.text((5, 54), heartbeat_time, fill=255)
         draw.text((85, 54), current_time, fill=255)
 
         self.display.image(image)
@@ -433,7 +444,7 @@ class DisplayStation:
                 if 'SUMMARY2' in self.summary_stats:
                     body += f"  {self.summary_stats['SUMMARY2']}\n"
                 if 'SUMMARY3' in self.summary_stats:
-                    body += f"  Hourly predator avg: {self.summary_stats['SUMMARY3']}\n"
+                    body += f"  Hourly detections: {self.summary_stats['SUMMARY3']}\n"
             else:
                 body += "\n📊 FIELD SCAN SUMMARY: Not received yet\n"
 

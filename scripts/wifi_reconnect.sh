@@ -12,7 +12,7 @@ if ping -c 1 -W 3 8.8.8.8 &>/dev/null; then
 fi
 
 # Scan for available networks
-SCAN=$(nmcli -t -f SSID device wifi list --rescan yes 2>/dev/null)
+SCAN=$(nmcli -t -f SSID device wifi list --rescan no 2>/dev/null)
 
 # Get the configured connection name from nmcli
 CONNECTION=$(nmcli -t -f NAME,TYPE connection show | grep wireless | cut -d: -f1 | head -1)

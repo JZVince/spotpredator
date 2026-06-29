@@ -27,7 +27,6 @@ class AlertHandler:
         # Alert settings from config
         self.buzzer_enabled = config.get('alerts', {}).get('buzzer_enabled', True)
         self.lora_enabled = config.get('alerts', {}).get('lora_broadcast', True)
-        self.save_images = config.get('alerts', {}).get('save_images', True)
         self.image_path = config.get('alerts', {}).get('image_path', 'data/detections/')
         self.log_path = config.get('alerts', {}).get('log_path', 'data/logs/detections.log')
 
@@ -36,7 +35,6 @@ class AlertHandler:
         self.cooldown_seconds = config.get('detection', {}).get('cooldown_period', 30)
 
         # Ensure directories exist
-        os.makedirs(self.image_path, exist_ok=True)
         os.makedirs(os.path.dirname(self.log_path), exist_ok=True)
 
         logger.info("Alert handler initialized")
@@ -91,41 +89,17 @@ class AlertHandler:
         predator_type = detection['class']
         confidence = detection['confidence']
 
-        # Check cooldown
-        if not self._should_alert(predator_type):
-            return False
-
         # Get timestamp
         timestamp_str = self.rtc.get_timestamp_string("%Y-%m-%d %H:%M:%S")
         time_short = self.rtc.get_timestamp_string("%H:%M")
         date_short = self.rtc.get_timestamp_string("%m/%d/%Y")
 
+        # Check cooldown before buzzer/LoRa/email alerts
+        if not self._should_alert(predator_type):
+            return False
+
         logger.info(f"🚨 PREDATOR DETECTED: {predator_type} (confidence: {confidence:.2f})")
-
-        # Log detection
         self._log_detection(predator_type, confidence, timestamp_str)
-
-        # Save image
-        if self.save_images and image is not None:
-            try:
-                from PIL import Image as PILImage
-
-                # Generate filename
-                safe_timestamp = timestamp_str.replace(' ', '_').replace(':', '-')
-                filename = f"{predator_type}_{safe_timestamp}_{int(confidence*100)}.jpg"
-                filepath = os.path.join(self.image_path, filename)
-
-                # Save
-                if hasattr(image, 'save'):  # PIL Image
-                    image.save(filepath)
-                else:  # Numpy array
-                    import numpy as np
-                    PILImage.fromarray(image).save(filepath)
-
-                logger.info(f"Saved detection image: {filename}")
-
-            except Exception as e:
-                logger.error(f"Failed to save image: {e}")
 
         # Activate buzzer
         if self.buzzer_enabled and self.buzzer.gpio_available:

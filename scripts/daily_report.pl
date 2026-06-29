@@ -44,9 +44,9 @@ while (my $line = <$fh>) {
 }
 close($fh);
 
-# Parse SUMMARY3 hourly data: "6h:23% 7h:25% 8h:30%..."
+# Parse SUMMARY3 hourly data: "6h:3 7h:1 8h:5..."
 if (exists $summary{SUMMARY3}) {
-    while ($summary{SUMMARY3} =~ /(\d+)h:(\d+)%/g) {
+    while ($summary{SUMMARY3} =~ /(\d+)h:(\d+)/g) {
         $hourly_predator{$1} = $2;
     }
 }
@@ -161,17 +161,17 @@ sub build_html {
     if (%hourly_predator) {
         my @hours = sort { $a <=> $b } keys %hourly_predator;
         $chart_html .= '<table style="border-collapse:collapse;width:100%;max-width:600px;">';
-        $chart_html .= '<tr><th style="text-align:left;padding:4px;">Hour</th><th style="text-align:left;padding:4px;">Predator Confidence</th><th style="padding:4px;">%</th></tr>';
+        $chart_html .= '<tr><th style="text-align:left;padding:4px;">Hour</th><th style="text-align:left;padding:4px;">Detections</th><th style="padding:4px;">#</th></tr>';
         for my $h (@hours) {
             my $val = $hourly_predator{$h};
-            my $bar_color = $val >= 85 ? '#c0392b' : $val >= 50 ? '#e67e22' : '#2c7a2c';
-            my $bar_width = $val * 3;  # scale to max ~300px
+            my $bar_color = $val >= 5 ? '#c0392b' : $val >= 2 ? '#e67e22' : '#2c7a2c';
+            my $bar_width = $val * 30;  # scale: 10 detections = 300px
             $chart_html .= "<tr>
                 <td style='padding:4px;white-space:nowrap;'>${h}:00</td>
                 <td style='padding:4px;width:100%;'>
                     <div style='background:$bar_color;width:${bar_width}px;height:20px;border-radius:3px;'></div>
                 </td>
-                <td style='padding:4px;text-align:right;'>${val}%</td>
+                <td style='padding:4px;text-align:right;'>${val}</td>
             </tr>\n";
         }
         $chart_html .= '</table>';
@@ -210,7 +210,7 @@ sub build_html {
   <h3 style="border-bottom:2px solid #ddd;padding-bottom:6px;margin-top:24px;">Field Scan Summary</h3>
   $summary_html
 
-  <h3 style="border-bottom:2px solid #ddd;padding-bottom:6px;margin-top:24px;">Predator Confidence by Hour</h3>
+  <h3 style="border-bottom:2px solid #ddd;padding-bottom:6px;margin-top:24px;">Detections by Hour</h3>
   $chart_html
 
   <p style="margin-top:30px;font-size:12px;color:#999;">SpotPredator &mdash; Farm Predator Detection System</p>

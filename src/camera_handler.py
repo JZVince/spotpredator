@@ -1,5 +1,6 @@
 """Camera Handler for Arducam Camera Module 3"""
 import logging
+import time
 from picamera2 import Picamera2
 from PIL import Image
 
@@ -23,7 +24,6 @@ class CameraHandler:
     def start(self):
         """Start the camera"""
         try:
-            import time
             self.camera = Picamera2()
 
             config = self.camera.create_still_configuration(
@@ -32,7 +32,7 @@ class CameraHandler:
                     "AwbEnable": True,
                     "NoiseReductionMode": 2,
                     "Sharpness": 2.0,
-                    "AeExposureMode": 1,
+                    "AeExposureMode": 0,
                 }
             )
             self.camera.configure(config)
@@ -50,14 +50,21 @@ class CameraHandler:
 
     def capture_frame(self):
         """
-        Capture a single frame
+        Capture a single frame split into three 640x640 tiles (left, middle, right).
 
         Returns:
-            numpy array: Image as RGB array, or None if capture fails
+            list of numpy arrays: [left, middle, right] tiles, or None if capture fails
         """
         try:
             frame = self.camera.capture_array()
-            return frame
+            # Crop top 440px (sky) — keeps 1920x640 ground-level view
+            cropped = frame[440:, :, :]
+            tiles = [
+                cropped[:, 0:640, :],
+                cropped[:, 640:1280, :],
+                cropped[:, 1280:1920, :],
+            ]
+            return tiles
 
         except Exception as e:
             logger.error(f"Failed to capture frame: {e}")
@@ -91,6 +98,8 @@ class CameraHandler:
         try:
             if self.camera:
                 self.camera.stop()
+                self.camera.close()
+                self.camera = None
                 logger.info("Camera stopped")
         except Exception as e:
             logger.error(f"Error stopping camera: {e}")

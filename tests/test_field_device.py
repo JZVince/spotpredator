@@ -43,21 +43,25 @@ print()
 print("Camera:")
 try:
     from camera_handler import CameraHandler
+    import numpy as np
+    from PIL import Image as PILImage
     cam = CameraHandler(resolution=(1920, 1080))
     if cam.start():
-        frame = cam.capture_frame()
-        if frame is not None:
-            check("Camera start", PASS, f"Frame shape: {frame.shape}")
-            import numpy as np
-            from PIL import Image as PILImage
-            mean = frame.mean()
-            if mean > 5:
-                check("Frame content", PASS, f"Mean pixel: {mean:.1f}")
-            else:
-                check("Frame content", FAIL, "Frame appears blank/black")
-            save_path = "data/scans/test_capture.jpg"
-            PILImage.fromarray(frame[:, :, ::-1]).save(save_path, quality=92)
-            check("Test image saved", PASS, save_path)
+        tiles = cam.capture_frame()
+        if tiles is not None:
+            check("Camera start", PASS, f"Tiles: {len(tiles)}, shape: {tiles[0].shape}")
+            tile_names = ['L', 'M', 'R']
+            all_ok = True
+            for i, tile in enumerate(tiles):
+                mean = tile.mean()
+                if mean > 5:
+                    check(f"Tile {tile_names[i]} content", PASS, f"Mean pixel: {mean:.1f}")
+                else:
+                    check(f"Tile {tile_names[i]} content", FAIL, "Appears blank/black")
+                    all_ok = False
+                save_path = f"data/scans/test_capture_{tile_names[i]}.jpg"
+                PILImage.fromarray(tile[:, :, ::-1]).save(save_path, quality=92)
+                check(f"Tile {tile_names[i]} saved", PASS, save_path)
         else:
             check("Camera capture", FAIL, "capture_frame() returned None")
         cam.stop()
