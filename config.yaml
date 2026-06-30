@@ -34,8 +34,10 @@ hardware:
   stepper:
     enabled: true
     pins: [5, 6, 13, 19]  # ULN2003 IN1-IN4 (BCM)
-    positions: 6  # Scan positions around the circle (60 deg apart)
+    positions: 6  # View positions split each side of center (3 right, 3 left)
     step_delay: 0.0015  # Seconds between steps
+    steps_per_rev: 4096  # Half-steps per 360 deg — calibrate if rotation is off
+    degrees_per_step: 66  # Gap between positions (~camera horizontal FOV, no seam gaps)
 
 alerts:
   buzzer_enabled: false

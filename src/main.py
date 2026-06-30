@@ -110,7 +110,9 @@ def main():
             stepper = StepperHandler(
                 pins=tuple(stepper_config.get('pins', [5, 6, 13, 19])),
                 positions=stepper_config.get('positions', 6),
-                step_delay=stepper_config.get('step_delay', 0.0015)
+                step_delay=stepper_config.get('step_delay', 0.0015),
+                steps_per_rev=stepper_config.get('steps_per_rev', 4096),
+                degrees_per_step=stepper_config.get('degrees_per_step', 66)
             )
 
         # Alert handler
@@ -346,8 +348,8 @@ def main():
                     continue
 
                 now_dt = rtc.get_time()
-                pos = stepper.current_position if stepper else 0
-                tile_names = [f'P{pos}L', f'P{pos}M', f'P{pos}R']
+                pos = stepper._offset_label(stepper.current_offset) if stepper else 'C'
+                tile_names = [f'{pos}L', f'{pos}M', f'{pos}R']
                 new_alert = False
                 alerted_this_cycle = set()
                 scan_save_counter += 1
