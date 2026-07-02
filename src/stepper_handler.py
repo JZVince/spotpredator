@@ -84,7 +84,11 @@ class StepperHandler:
         """Build center-out offset sequence: center, right edge, center, left edge, center.
 
         Returns a list of signed position offsets the camera visits, e.g. for
-        steps_each_side=3: [0, 1, 2, 3, 0, -1, -2, -3, 0]
+        steps_each_side=3: [0, 1, 2, 3, 0, -1, -2, -3]
+
+        No trailing 0: the leading 0 doubles as the single center between the
+        end of the left sweep and the start of the next right sweep, so the
+        camera doesn't pause on center twice when the cycle wraps.
         """
         order = [0]
         for i in range(1, self.steps_each_side + 1):  # sweep right
@@ -92,7 +96,6 @@ class StepperHandler:
         order.append(0)                                # snap back to center
         for i in range(1, self.steps_each_side + 1):  # sweep left
             order.append(-i)
-        order.append(0)                                # snap back to center
         return order
 
     def _step(self, steps, direction=1):
@@ -156,6 +159,25 @@ class StepperHandler:
         except Exception as e:
             logger.error(f"Failed to home stepper: {e}")
 
+    def jog(self, degrees, direction=1):
+        """Manually rotate the camera by a raw angle for hand-aiming/adjustment.
+
+        Does NOT change the tracked scan offset — use this to physically re-aim
+        the camera (e.g. after install, or to re-center if the coupling slipped).
+        After jogging, whatever the camera points at becomes the new reference,
+        so follow with a fresh start (or treat the current spot as center).
+
+        Args:
+            degrees: How far to rotate, in output degrees.
+            direction: 1 = clockwise, -1 = counter-clockwise.
+        """
+        if not self.gpio_available:
+            logger.warning("Cannot jog: GPIO not available")
+            return
+        steps = int((abs(degrees) / 360.0) * self.steps_per_rev)
+        self._step(steps, direction=1 if direction > 0 else -1)
+        logger.info(f"📐 Jogged {degrees}° {'CW' if direction > 0 else 'CCW'}")
+
     def cleanup(self):
         """De-energize coils and release GPIO. Safe to call more than once."""
         if self.gpio_available and not self._cleaned_up:
@@ -181,6 +203,26 @@ if __name__ == "__main__":
     if GPIO is None:
         print("❌ RPi.GPIO not available")
         sys.exit(1)
+
+    # Manual jog: aim the camera by hand from the terminal.
+    #   python stepper_handler.py jog <degrees> [cw|ccw]
+    # e.g. `python stepper_handler.py jog 30 cw`  or  `python stepper_handler.py jog 15 ccw`
+    if len(sys.argv) > 1 and sys.argv[1] == "jog":
+        try:
+            deg = float(sys.argv[2])
+        except (IndexError, ValueError):
+            print("Usage: python stepper_handler.py jog <degrees> [cw|ccw]")
+            sys.exit(1)
+        direction = -1 if (len(sys.argv) > 3 and sys.argv[3].lower() == "ccw") else 1
+        s = StepperHandler(positions=2)
+        if s.gpio_available:
+            print(f"Jogging {deg}° {'CCW' if direction < 0 else 'CW'}...")
+            s.jog(deg, direction=direction)
+            s.cleanup()
+            print("✅ Done. Camera re-aimed. (Restart the service so it treats this as center.)")
+        else:
+            print("❌ Stepper not available")
+        sys.exit(0)
 
     if len(sys.argv) > 1 and sys.argv[1] == "360":
         print("Calibration: rotating one full 360° revolution forward, then back.")

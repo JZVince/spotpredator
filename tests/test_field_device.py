@@ -120,6 +120,24 @@ print()
 print("Model:")
 try:
     det_config = config.get('detector', {})
+    # Report which TFLite runtime is actually available (same fallback chain detector.py uses),
+    # so a missing runtime is diagnosed clearly instead of surfacing as a raw ImportError.
+    runtime = None
+    try:
+        import tflite_runtime  # noqa: F401
+        runtime = "tflite_runtime"
+    except ImportError:
+        try:
+            import ai_edge_litert  # noqa: F401
+            runtime = "ai_edge_litert"
+        except ImportError:
+            runtime = None
+    if runtime:
+        check("Inference runtime", PASS, runtime)
+    else:
+        check("Inference runtime", FAIL,
+              "no TFLite runtime found — is this running in the service venv? "
+              "(service uses /home/pi/spotpredator/venv)")
     from detector import PredatorDetector
     detector = PredatorDetector(
         model_path=det_config.get('model_path', 'models/spotpredator_classifier.tflite'),
@@ -128,21 +146,21 @@ try:
     )
     if detector.interpreter:
         check("Model load", PASS, det_config.get('model_path'))
-        # Run inference on a blank frame to verify model works
+        # Run inference the SAME way the service does (detect_predators), so this works for
+        # whatever model type is actually configured (YOLO / classifier / SSD) with no assumptions.
         import numpy as np
-        blank = np.zeros((480, 640, 3), dtype=np.uint8)
-        probs = detector.get_all_probabilities(blank)
-        if probs:
-            prob_str = ' | '.join(f"{k}:{int(v*100)}%" for k, v in probs.items())
-            check("Model inference", PASS, prob_str)
-            # Warn if all probs are identical (collapsed model)
-            vals = list(probs.values())
-            if max(vals) - min(vals) < 0.01:
-                check("Model health", WARN, "All probabilities identical - possible collapse")
+        blank = np.zeros((640, 640, 3), dtype=np.uint8)
+        detections = detector.detect_predators(blank)
+        # A successful inference returns a list (possibly empty on a blank frame — that's fine).
+        if isinstance(detections, list):
+            if detections:
+                det_str = ', '.join(
+                    f"{d.get('class','?')}:{int(d.get('confidence',0)*100)}%" for d in detections)
+                check("Model inference", PASS, f"{len(detections)} detection(s): {det_str}")
             else:
-                check("Model health", PASS, "Probabilities vary normally")
+                check("Model inference", PASS, "ran OK (0 detections on blank frame, expected)")
         else:
-            check("Model inference", FAIL, "No output")
+            check("Model inference", FAIL, f"unexpected output type: {type(detections).__name__}")
     else:
         check("Model load", FAIL, "Model file not found or failed to load")
 except Exception as e:

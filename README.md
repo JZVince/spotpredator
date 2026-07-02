@@ -13,13 +13,15 @@ This is my first Raspberry Pi, computer vision, and soldering project — built 
 The system consists of two devices. Field detector code lives in `src/`, display station code lives in `display_station/`.
 
 **Field Detector** — deployed outdoors near your animals
-- Captures images every 15 seconds using a Arducam Camera (Cheaper)
-- Runs AI inference locally using a TFLite classification model (WIP: YOLOV8 Nano object detection model)
+- Captures images on a scan interval using an Arducam Camera Module 3
+- Runs AI inference locally using a fine-tuned **YOLO11n** object-detection TFLite model
+- **Rotating camera turret** — a 28BYJ-48 stepper sweeps the camera in a center-out pattern for wider coverage
 - Sounds a buzzer alarm on detection
 - Transmits alerts wirelessly to your home via LoRa radio
 - Sends heartbeat status updates every 30 minutes to keep you updated on system status
-- Operates on a schedule (default 6:00 AM – 9:01 PM)
-- Runs on battery power — no WiFi required
+- Operates on a schedule (default 6:30 AM – 9:01 PM)
+- **Solar + battery powered** — true off-grid operation, no WiFi required
+- Housed in a **custom 3D-printed ABS enclosure** (field-validated through a Texas summer)
 
 **Display Station** — sits indoors on your desk
 - Receives LoRa alerts from the field device
@@ -63,17 +65,75 @@ The system consists of two devices. Field detector code lives in `src/`, display
 
 ## AI Model
 
-SpotPredator uses a custom-trained **EfficientNetB0** classifier converted to TensorFlow Lite for on-device inference.
+SpotPredator uses a custom fine-tuned **YOLO11 nano (YOLO11n)** object-detection model,
+converted to TensorFlow Lite (FP16) for on-device inference on the Pi Zero 2 W.
 
-- **Input**: 224x224 RGB image
-- **Classes**: `background`, `poultry`, `predator`
-- **Confidence threshold**: 85% (configurable)
-- **Inference time**: ~1-2 seconds on Pi Zero 2 W
-- **Model size**: ~16MB
+- **Input**: 640x640 RGB image
+- **Deployment classes**: `coyote`, `fox`, `raptor`
+- **Confidence threshold**: 0.7 (configurable)
+- **Runtime**: `tflite_runtime` / `ai-edge-litert` (CPU, XNNPACK)
+- **Trained on**: author-collected field images + LILA BC + GBIF imagery
 
-The model is trained using transfer learning from ImageNet weights. Training is done in Google Colab with GPU acceleration and exported as a `.tflite` file for deployment.
+The model is published on Hugging Face (with usage code, classes, and limitations):
+👉 **https://huggingface.co/JZVince/predator_v2_fp16**
 
-> **Note**: The model file is not included in this repository due to size. In addition, I am trying a second custom model with YOLOV8 Nano object detection model to see which one is better. Something I have learned is that, before you deploy your model into your device, test it with some new test images locally and make sure you are getting reasonable result. My classification model was producing 66% background confidence for every scans and I didn't know about it until two weeks later. What's funny is that none of my poultries got killed for those two weeks. So I thought great, my device is working perfectly without any false positives.
+**Small-object optimization**: predators often occupy only 20–40 px in a 1920×1080 frame.
+The pipeline crops the sky band (keeping a 1920×640 ground strip) and tiles it into three
+640×640 patches (left/middle/right) — so each patch gets the full resolution budget and
+distant predators appear larger to the model. The same crop+tile is applied at training and
+inference so the images match.
+
+> **Model history / lesson learned**: This project started with an EfficientNetB0 classifier
+> (`background`/`poultry`/`predator`) before moving to YOLO11n object detection for better
+> localization of small, distant animals. Key lesson: **before deploying, test your model on
+> fresh local images and confirm reasonable output.** My original classifier was silently
+> returning ~66% "background" for every scan for two weeks — I only noticed because I happened
+> to check, not because anything failed (luckily no poultry were lost in that window).
+
+---
+
+## How It Works
+
+```mermaid
+flowchart TD
+    subgraph FIELD["🌾 Field Detector (solar + battery, offline)"]
+        SCHED{Within active<br/>hours?}
+        CAM[Arducam Module 3<br/>capture frame]
+        CROP[Crop sky band →<br/>tile into 3× 640×640]
+        YOLO[YOLO11n TFLite<br/>inference on Pi Zero 2 W]
+        HIT{Predator<br/>detected?}
+        BUZZ[Sound buzzer]
+        MOTOR[Rotate camera turret<br/>to next scan position]
+        SLEEP[Sleep until 6:30 AM<br/>+ send daily summary]
+    end
+
+    subgraph LINK[" "]
+        LORA(((📡 LoRa 915 MHz<br/>radio link)))
+    end
+
+    subgraph HOME["🏠 Display Station (indoor)"]
+        RX[Receive LoRa alert]
+        OLED[Flash OLED:<br/>predator, confidence, time]
+        EMAIL[Send email alert]
+        REPORT[Log scan summary →<br/>Perl daily report]
+    end
+
+    SCHED -- yes --> CAM
+    SCHED -- no --> SLEEP
+    CAM --> CROP --> YOLO --> HIT
+    HIT -- yes --> BUZZ --> LORA
+    HIT -- no --> MOTOR
+    BUZZ --> MOTOR
+    MOTOR --> SCHED
+    LORA --> RX
+    RX --> OLED
+    RX --> EMAIL
+    RX --> REPORT
+```
+
+**Heartbeat:** every 30 minutes the field device also sends a status heartbeat over LoRa so
+the display station knows the system is alive. **No WiFi or internet is needed between the two
+units** — all field-to-home communication is direct LoRa radio.
 
 ---
 
@@ -240,19 +300,24 @@ See [WIRING.md](WIRING.md) for full pin diagrams for both devices.
 
 ## Future Plans
 
-- Retrain model with images captured directly from field camera for better real-world accuracy
-- Training YOLOv8 Nano with custom dataset for a better object detection model
+- Keep growing the field-image dataset for better real-world accuracy
 - Expand predator classes with more species-specific training data
-- Improve enclosure weatherproofing with ventilation and heatsink - This has to do with 3D printing design
-- Add physical button on display station to acknowledge and clear alerts
-- Explore ESP32 as a lower-cost alternative for the display station and other budget options
+- Add active homing (limit switch / hard stop) so the camera turret can recover an exact
+  reference position after a power loss mid-rotation
+- Add a physical button on the display station to acknowledge and clear alerts
+- Explore ESP32 as a lower-cost alternative for the display station
 - Write an app for quick installation
 
 ---
 
 ## License
 
-MIT License — feel free to modify and adapt for your needs.
+**Project code, hardware, and 3D models:** MIT License — feel free to modify and adapt.
+
+**AI model** (`predator_v2_fp16`, published separately on Hugging Face): **AGPL-3.0**, because
+it is fine-tuned from [Ultralytics YOLO11](https://github.com/ultralytics/ultralytics) (AGPL-3.0)
+and derivative models inherit that license. See the
+[model card](https://huggingface.co/JZVince/predator_v2_fp16) for details.
 
 ---
 

@@ -308,10 +308,16 @@ def main():
                         camera.stop()
                         camera.start()
                         logger.info("📷 Camera reinitialized after sleep")
+                        # Ensure camera begins the day at center/start
+                        if stepper:
+                            stepper.home()
                         if buzzer.gpio_available:
                             buzzer.beep(count=1, beep_duration=0.1)
                     else:
                         logger.info("💤 Outside active detection hours - SLEEPING")
+                        # Return camera to center/start so it rests untwisted overnight
+                        if stepper:
+                            stepper.home()
                         if buzzer.gpio_available:
                             buzzer.beep(count=2, beep_duration=0.1, pause_duration=0.1)
                     last_schedule_status = is_active
