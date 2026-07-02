@@ -42,8 +42,9 @@ that watches over free-range poultry and alerts a display station when a predato
 - **Format:** TensorFlow Lite, FP16 quantized (`fp16`)
 - **Input:** 640 × 640 RGB
 - **Runtime:** `tflite_runtime` / `ai-edge-litert` on Raspberry Pi (CPU, XNNPACK)
-- **Detection classes used in deployment:** `coyote`, `fox`, `raptor`
-- **Full label set:** `background`, `poultry`, `predator`, `coyote`, `fox`, `raptor`
+- **Detection classes:** `coyote`, `fox`, `raptor` (predators only)
+- Non-predators (background, people, poultry) are **negative training instances** — they
+  carry no label and produce no detection.
 
 ## Intended use
 

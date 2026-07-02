@@ -108,15 +108,15 @@ models/
 Download the published model from Hugging Face:
 **https://huggingface.co/JZVince/predator_v2_fp16**
 
-`labels.txt` should contain one class per line:
+`labels.txt` contains the detection classes, one per line:
 ```
-background
-poultry
-predator
 coyote
 fox
 raptor
 ```
+
+> Only predators are labeled. Non-predators (background, people, poultry) are negative
+> instances used during training — they carry no label and produce no detection.
 
 > Before deploying, always test your model locally with a few known images to confirm it is producing reasonable results.
 
