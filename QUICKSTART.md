@@ -101,15 +101,21 @@ Copy your trained TFLite model and labels to the `models/` directory:
 
 ```
 models/
-├── spotpredator_classifier.tflite
-└── classifier_labels.txt
+├── predator_v2_fp16.tflite
+└── labels.txt
 ```
 
-`classifier_labels.txt` should contain one class per line:
+Download the published model from Hugging Face:
+**https://huggingface.co/JZVince/predator_v2_fp16**
+
+`labels.txt` should contain one class per line:
 ```
 background
 poultry
 predator
+coyote
+fox
+raptor
 ```
 
 > Before deploying, always test your model locally with a few known images to confirm it is producing reasonable results.

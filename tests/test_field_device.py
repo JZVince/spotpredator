@@ -141,7 +141,7 @@ try:
     from detector import PredatorDetector
     detector = PredatorDetector(
         model_path=det_config.get('model_path', 'models/spotpredator_classifier.tflite'),
-        labels_path=det_config.get('labels_path', 'models/classifier_labels.txt'),
+        labels_path=det_config.get('labels_path', 'models/labels.txt'),
         confidence_threshold=det_config.get('confidence_threshold', 0.85)
     )
     if detector.interpreter:
