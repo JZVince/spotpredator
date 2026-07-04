@@ -460,16 +460,19 @@ def main():
                 today = now_dt.date()
                 if today.day == 1 and today.month != last_cleanup_month:
                     image_path = config.get('alerts', {}).get('image_path', 'data/detections/')
-                    deleted = 0
                     cutoff = time.time() - 30 * 24 * 3600
-                    for f in Path(image_path).glob('*.jpg'):
-                        try:
-                            if f.stat().st_mtime < cutoff:
-                                f.unlink()
-                                deleted += 1
-                        except Exception as e:
-                            logger.error(f"Failed to delete detection image {f}: {e}")
-                    logger.info(f"🗑️  Monthly cleanup: deleted {deleted} detection images older than 30 days")
+                    # Clean both the annotated detections/ and the clean detections_clean/ folders
+                    for folder_path, folder_label in [(image_path, 'detection'),
+                                                       (clean_detection_path, 'clean detection')]:
+                        deleted = 0
+                        for f in Path(folder_path).glob('*.jpg'):
+                            try:
+                                if f.stat().st_mtime < cutoff:
+                                    f.unlink()
+                                    deleted += 1
+                            except Exception as e:
+                                logger.error(f"Failed to delete {folder_label} image {f}: {e}")
+                        logger.info(f"🗑️  Monthly cleanup: deleted {deleted} {folder_label} images older than 30 days")
                     last_cleanup_month = today.month
 
                 # Rotate camera to next scan position for the next cycle

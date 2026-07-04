@@ -1,45 +1,43 @@
 #!/bin/bash
-# WiFi reconnect script for field device
-# Runs every 5 minutes via cron. Scans for known network and reconnects if visible.
-# cron: */5 * * * * /bin/bash /home/pi/spotpredator/scripts/wifi_reconnect.sh >> /home/pi/spotpredator/data/logs/wifi_reconnect.log 2>&1
+# WiFi reconnect for the field device — gentle, low-load recovery.
+#
+# Runs ONCE PER HOUR, on the hour, via cron:
+#   0 * * * * /bin/bash /home/pi/spotpredator/scripts/wifi_reconnect.sh >> /home/pi/spotpredator/data/logs/wifi_reconnect.log 2>&1
+#
+# Why hourly (not every few minutes): the old per-minute rescan approach put too much heat/CPU
+# pressure on the Pi Zero (alongside the detection service) and could crash the device. This
+# device is outdoors and disconnected most of the time anyway, so a single gentle nudge once an
+# hour is plenty. And unlike the old "--rescan no" version — which read a stale scan cache and
+# kept skipping forever — this actually recovers a wedged WiFi radio by restarting
+# NetworkManager, which is what a full reboot did for us manually, but far lighter.
+#
+# Notes confirmed on this device:
+#   - WiFi power-save is OFF (not the wedge cause).
+#   - Connection profile "home-wifi" has autoconnect=yes, autoconnect-retries=0 (forever),
+#     yet NetworkManager still occasionally stalls and previously needed a reboot to recover.
+#
+# What it does each run:
+#   1. If the internet is reachable -> do nothing (cheap ping, NO WiFi scan).
+#   2. If offline -> restart NetworkManager ONCE. That re-initializes the WiFi driver, forces a
+#      fresh scan, and lets autoconnect reconnect. One quick action, not a sustained scan loop.
 
-WIFI_SSID="$(nmcli -t -f NAME connection show --active | head -1)"
 LOG_PREFIX="$(date '+%Y-%m-%d %H:%M:%S')"
 
-# Already connected and internet reachable — nothing to do
+# 1) Already online? Nothing to do. (Cheap check — no WiFi scan, no load.)
 if ping -c 1 -W 3 8.8.8.8 &>/dev/null; then
     exit 0
 fi
 
-# Scan for available networks
-SCAN=$(nmcli -t -f SSID device wifi list --rescan no 2>/dev/null)
+# 2) Offline — give NetworkManager a single gentle kick to recover a possibly-wedged radio.
+echo "$LOG_PREFIX | Offline — restarting NetworkManager to recover WiFi..."
+sudo systemctl restart NetworkManager
 
-# Get the configured connection name from nmcli
-CONNECTION=$(nmcli -t -f NAME,TYPE connection show | grep wireless | cut -d: -f1 | head -1)
+# Give it time to re-init the radio, scan, and reconnect via autoconnect.
+sleep 30
 
-if [ -z "$CONNECTION" ]; then
-    echo "$LOG_PREFIX | No wireless connection profile found, skipping"
-    exit 0
-fi
-
-# Get the SSID of that connection
-TARGET_SSID=$(nmcli -t -f 802-11-wireless.ssid connection show "$CONNECTION" 2>/dev/null | cut -d: -f2)
-
-if [ -z "$TARGET_SSID" ]; then
-    echo "$LOG_PREFIX | Could not determine target SSID, skipping"
-    exit 0
-fi
-
-# Check if target SSID is visible in scan results
-if echo "$SCAN" | grep -q "$TARGET_SSID"; then
-    echo "$LOG_PREFIX | Network '$TARGET_SSID' visible, attempting reconnect..."
-    nmcli connection up "$CONNECTION" &>/dev/null
-    sleep 20
-    if ping -c 1 -W 3 8.8.8.8 &>/dev/null; then
-        echo "$LOG_PREFIX | Reconnected successfully"
-    else
-        echo "$LOG_PREFIX | Reconnect attempted but internet still unreachable"
-    fi
+# Report the outcome.
+if ping -c 1 -W 3 8.8.8.8 &>/dev/null; then
+    echo "$LOG_PREFIX | Recovered — internet reachable after NetworkManager restart"
 else
-    echo "$LOG_PREFIX | Network '$TARGET_SSID' not visible, skipping reconnect"
+    echo "$LOG_PREFIX | Still offline after restart — will retry next hour"
 fi
