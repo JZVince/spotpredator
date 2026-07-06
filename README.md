@@ -14,8 +14,8 @@ The system consists of two devices. Field detector code lives in `src/`, display
 
 ![SpotPredator in the field](img/spotpredator_001.jpeg)
 
-**Field Detector** — deployed outdoors near your animals
 
+**Field Detector** — deployed outdoors near your animals
 - Captures images on a scan interval using an Arducam Camera Module 3
 - Runs AI inference locally using a fine-tuned **YOLO11n** object-detection TFLite model
 - **Rotating camera turret** — a 28BYJ-48 stepper sweeps the camera in a center-out pattern for wider coverage
@@ -27,7 +27,6 @@ The system consists of two devices. Field detector code lives in `src/`, display
 - Housed in a **custom 3D-printed ABS enclosure** (field-validated through a Texas summer)
 
 **Display Station** — sits indoors on your desk
-
 - Receives LoRa alerts from the field device
 - Shows predator type, confidence, and time on an OLED display
 - Flashes the screen continuously until the threat clears
@@ -40,32 +39,29 @@ The system consists of two devices. Field detector code lives in `src/`, display
 ## Hardware
 
 ### Both Devices
-
-| Component             | Details                                     |
-| --------------------- | ------------------------------------------- |
-| Raspberry Pi Zero 2 W | Main compute unit                           |
-| microSD card          | 32GB+ recommended                           |
-| 5V 2.5A power supply  | For indoor/bench use                        |
-| RYLR998 LoRa Module   | 915MHz (US) / 868MHz (EU), up to 15km range |
-| SFM-27-W Piezo Buzzer | 3-27V, loud alarm                           |
-| 2N2222 NPN Transistor | Buzzer drive circuit                        |
-| 1kΩ resistor          | Transistor base resistor                    |
+| Component | Details |
+|-----------|---------|
+| Raspberry Pi Zero 2 W | Main compute unit |
+| microSD card | 32GB+ recommended |
+| 5V 2.5A power supply | For indoor/bench use |
+| RYLR998 LoRa Module | 915MHz (US) / 868MHz (EU), up to 15km range |
+| SFM-27-W Piezo Buzzer | 3-27V, loud alarm |
+| 2N2222 NPN Transistor | Buzzer drive circuit |
+| 1kΩ resistor | Transistor base resistor |
 
 ### Field Detector (additional)
-
-| Component                     | Details                               |
-| ----------------------------- | ------------------------------------- |
-| Arducam Camera Module 3       | IMX708, autofocus, 12MP               |
-| 15-to-22 pin FFC cable        | Required for Pi Zero camera connector |
-| DS3231 RTC Module             | Real-time clock with CR2032 battery   |
-| 12V LiFePO4 Battery (10Ah)    | Field power supply                    |
-| 12V → 5V DC-DC Converter (3A) | Powers the Pi from battery            |
-| 30W solar panel               |
+| Component | Details |
+|-----------|---------|
+| Arducam Camera Module 3 | IMX708, autofocus, 12MP |
+| 15-to-22 pin FFC cable | Required for Pi Zero camera connector |
+| DS3231 RTC Module | Real-time clock with CR2032 battery |
+| 12V LiFePO4 Battery (10Ah) | Field power supply |
+| 12V → 5V DC-DC Converter (3A) | Powers the Pi from battery |
+| 30W solar panel |
 
 ### Display Station (additional)
-
-| Component            | Details                |
-| -------------------- | ---------------------- |
+| Component | Details |
+|-----------|---------|
 | SSD1306 OLED Display | 128x64, I2C, 0.96 inch |
 
 ---
@@ -159,13 +155,11 @@ sudo raspi-config
 ```
 
 Enable the following:
-
 - Camera (libcamera) — field detector only
 - I2C
 - Serial Port — **disable serial console, keep serial hardware enabled**
 
 Then reboot:
-
 ```bash
 sudo reboot
 ```
@@ -182,14 +176,12 @@ cd spotpredator
 A setup script handles everything — dependencies, virtual environment, data directories, systemd service, and crontab.
 
 **Field Detector:**
-
 ```bash
 chmod +x scripts/setup_field.sh
 ./scripts/setup_field.sh
 ```
 
 **Display Station:**
-
 ```bash
 chmod +x scripts/setup_display.sh
 ./scripts/setup_display.sh
@@ -206,21 +198,21 @@ Edit `config.yaml` to match your setup:
 
 ```yaml
 detector:
-  confidence_threshold: 0.85 # Raise to reduce false positives
+  confidence_threshold: 0.85   # Raise to reduce false positives
 
 hardware:
   lora:
-    frequency: 915 # 915 for US, 868 for EU
-    network_id: 18 # Change if multiple LoRa networks nearby
+    frequency: 915              # 915 for US, 868 for EU
+    network_id: 18              # Change if multiple LoRa networks nearby
   buzzer:
     gpio_pin: 27
 
 detection:
-  check_interval: 15 # Seconds between scans
-  cooldown_period: 180 # Seconds before re-alerting same predator
+  check_interval: 15            # Seconds between scans
+  cooldown_period: 180          # Seconds before re-alerting same predator
   schedule_enabled: true
-  start_hour: 6 # Start scanning at 6:00 AM
-  end_hour: 21 # Stop scanning at 9:01 PM
+  start_hour: 6                 # Start scanning at 6:00 AM
+  end_hour: 21                  # Stop scanning at 9:01 PM
   end_minute: 1
 ```
 
@@ -238,7 +230,6 @@ You can download the published model from Hugging Face:
 **https://huggingface.co/JZVince/predator_v2_fp16**
 
 `labels.txt` contains the detection classes, one per line:
-
 ```
 coyote
 fox
@@ -269,7 +260,6 @@ See [WIRING.md](WIRING.md) for full pin diagrams for both devices.
 ## Troubleshooting
 
 ### Cannot SSH into Pi — connection refused or times out
-
 - Before assuming hardware failure (SD card, cable, Pi itself), check your router first
 - Pi Zero 2 W only supports **2.4GHz WiFi** — if your router broadcasts a combined 2.4/5GHz network, the Pi may fail to connect
 - I'm not saying 5GHz won't work completely, but sure I had a lot issue with it.
@@ -279,39 +269,33 @@ See [WIRING.md](WIRING.md) for full pin diagrams for both devices.
 - After changing router settings, re-flash the SD card with the correct WiFi credentials and try again
 
 ### Camera not working
-
 - Reseat the ribbon cable firmly — this is the most common cause
 - Run `libcamera-hello` to test
 - Enable camera in `raspi-config` and reboot
 
 ### LoRa not responding
-
 - Verify VCC is on **Pin 17 (3.3V)**, not Pin 18 (GPIO)
 - Check TX/RX are crossed between Pi and LoRa module
 - Ensure serial console is disabled in `raspi-config`
 - Both devices must use the same frequency and network ID
 
 ### RTC resetting to year 2000
-
 - CR2032 battery contact is loose — press firmly and bend the spring contact
 - Replace battery if old
 - Reseat all RTC jumper wires
 
 ### Buzzer beeping continuously
-
 - Usually caused by RTC I2C errors interfering with GPIO
 - Reseat RTC module wires and reboot
 - Check `buzzer_enabled` in `config.yaml`
 - Possible soldering issue
 
 ### Station Display Device WiFi not reconnecting
-
 - Run `nmcli connection show` and verify autoconnect is `yes`
 - Disable WiFi power saving: `sudo iw dev wlan0 set power_save off`
 - Add `autoconnect-retries=0` to your `.nmconnection` file for unlimited retries
 
 ### Model producing identical confidence scores for every scan
-
 - Test with a known image: does inference output change with different inputs?
 - If probabilities are identical regardless of input — model has collapsed, retrain required
 - Common causes of model collapse:
