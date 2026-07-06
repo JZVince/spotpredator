@@ -148,7 +148,7 @@ def main():
     target_classes = config.get('detector', {}).get('target_classes', ['dog', 'cat', 'bird'])
 
     # Heartbeat tracking
-    hb = {'last_minute': -1, 'predator_type': None, 'predator_time': None, 'predator_conf': None}
+    hb = {'last_minute': -1}  # tracks which :00/:30 slot last fired a heartbeat
 
     # Image cleanup tracking
     last_cleanup_month = None
@@ -194,14 +194,11 @@ def main():
         return _start_time <= rtc.get_time().time() <= _end_time
 
     def send_heartbeat():
-        """Send heartbeat LoRa message every 30 minutes"""
+        """Send heartbeat LoRa message every 30 minutes — a pure 'field device is alive' ping.
+        Predator timing lives entirely on the station now: the station ages each PREDATOR alert
+        it receives ('seen N min ago') for 10 min. Heartbeats no longer carry predator info."""
         now = rtc.get_time()
-        if hb['predator_time'] and (time.time() - hb['predator_time']) < 600:
-            minutes_ago = int((time.time() - hb['predator_time']) / 60)
-            conf = hb['predator_conf'] or 0
-            msg = f"HEARTBEAT,{hb['predator_type']}_{conf}% seen {minutes_ago}min ago,{now.strftime('%H:%M')}"
-        else:
-            msg = f"HEARTBEAT,Field is clear,{now.strftime('%H:%M')}"
+        msg = f"HEARTBEAT,Field is clear,{now.strftime('%H:%M')}"
         lora.send_message(msg)
         logger.info(f"💓 Heartbeat sent: {msg} on {now.strftime('%Y-%m-%d')}")
 
@@ -414,22 +411,16 @@ def main():
                             logger.info(f"🎯 [{tile_tag}] Detected: {detection['class']} "
                                         f"(confidence: {detection['confidence']:.2f})")
 
-                            # Track last predator for heartbeat
-                            hb['predator_type'] = detection['class']
-                            hb['predator_time'] = time.time()
-                            hb['predator_conf'] = int(detection['confidence'] * 100)
-
                             # Only send alert once per predator class per scan cycle
                             if detection['class'] not in alerted_this_cycle:
                                 if alert_handler.send_alert(detection, image=None):
                                     new_alert = True
                                     alerted_this_cycle.add(detection['class'])
 
-                # Send immediate heartbeat on new alert so display updates right away
+                # NOTE: no immediate heartbeat on new detection anymore. The PREDATOR alert
+                # (sent via alert_handler.send_alert above) is what notifies + updates the
+                # station, which then ages it for 10 min. Heartbeats stay a pure 30-min ping.
                 now_dt = rtc.get_time()
-                if new_alert:
-                    send_heartbeat()
-                    hb['last_minute'] = now_dt.minute
 
                 # Check if heartbeat is due (every :00 or :30), only during active hours
                 if is_active:

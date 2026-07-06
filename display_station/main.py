@@ -130,6 +130,15 @@ class DisplayStation:
         self.alert_active = False  # True when flashing, cleared by heartbeat
         self.blink_state = False   # Current blink state
 
+        # Recent-predator tracking (station-side aging). When a heartbeat reports a predator
+        # ("<type>_<conf>% seen Nmin ago"), we record the type/conf and OUR receive time, then
+        # recompute "seen X min ago" live on every display refresh and drop it after 10 min.
+        # This makes the age update smoothly between the field's 30-min heartbeats, and lets the
+        # display self-expire instead of showing a frozen "1min ago" forever.
+        self.recent_predator = None       # e.g. "coyote_74"  (type_conf)
+        self.recent_predator_time = None  # our time.time() when we learned of it
+        self.PREDATOR_TTL = 600           # seconds to keep showing the predator (10 min)
+
         # Email and WiFi settings - loaded from .env file
         self.email_address = os.getenv("EMAIL_ADDRESS", "")
         self.email_password = os.getenv("EMAIL_PASSWORD", "")
@@ -163,8 +172,20 @@ class DisplayStation:
         # Line 1 (y=2): title
         draw.text((5, 2), "SpotPredator", fill=255)
 
-        # Lines 2-4 (y=18,30,42): status split into 18-char chunks
+        # Lines 2-4 (y=18,30,42): status split into 18-char chunks.
+        # If a predator was seen within PREDATOR_TTL, show a LIVE-aged line ("coyote 74% seen
+        # N min ago") recomputed here each refresh. After the TTL expires, drop it and fall back
+        # to the last heartbeat status (which by then is usually "Field is clear").
         status = self.last_heartbeat_status or "Waiting..."
+        if self.recent_predator and self.recent_predator_time:
+            age = time.time() - self.recent_predator_time
+            if age < self.PREDATOR_TTL:
+                ptype, pconf = self.recent_predator.split('_')
+                mins = int(age / 60)
+                status = f"{ptype} {pconf}% seen {mins}min ago"
+            else:
+                self.recent_predator = None  # expired — revert to heartbeat status
+                self.recent_predator_time = None
         words = status.split()
         lines = []
         current = ""
@@ -290,6 +311,10 @@ class DisplayStation:
                                 self.last_heartbeat_time = alert['time']
                                 self.alert_active = False  # Stop flashing on heartbeat
                                 self.last_alert = None
+                                # NOTE: heartbeats no longer carry predator timing. A heartbeat
+                                # does NOT interrupt an in-progress predator countdown (see
+                                # show_waiting) — only a new PREDATOR message or the 10-min
+                                # expiry clears it.
                                 logger.info(f"💓 Heartbeat: {alert['status']} at {alert['time']}")
                                 detection_logger.info(f"HEARTBEAT | {alert['status']} | {alert['time']}")
                                 field_logger.info(f"HEARTBEAT | {alert['status']} | {alert['time']}")
@@ -306,6 +331,15 @@ class DisplayStation:
                                 self.alert_time = time.time()
                                 self.alert_active = True  # Start flashing
                                 self.blink_state = False
+                                # Record this predator + OUR receive time so show_waiting can age
+                                # it live ("<type> <conf>% seen N min ago") for 10 min, then revert.
+                                # A NEW detection resets the clock; heartbeats do NOT interrupt it.
+                                try:
+                                    conf_pct = int(float(alert['confidence']) * 100)
+                                except (ValueError, TypeError):
+                                    conf_pct = alert['confidence']
+                                self.recent_predator = f"{alert['type']}_{conf_pct}"
+                                self.recent_predator_time = time.time()
                                 detection_logger.info(f"PREDATOR | {alert['type']} | confidence={alert['confidence']} | {alert.get('time','')} | {alert.get('date','')}")
                                 field_logger.info(f"PREDATOR | {alert['type']} | confidence={alert['confidence']} | {alert.get('time','')} | {alert.get('date','')}")
                                 self.beep(count=1, duration=0.15)
@@ -488,8 +522,9 @@ class DisplayStation:
                 self.check_for_message()
 
                 # Handle display
-                if self.alert_active and self.last_alert:
-                    # Keep flashing until heartbeat arrives
+                # Flash the alert briefly (~10s) on a fresh detection, then fall through to
+                # show_waiting(), which renders the live "seen N min ago" countdown for 10 min.
+                if self.alert_active and self.last_alert and (time.time() - (self.alert_time or 0)) < 10:
                     self.show_alert(
                         self.last_alert['type'],
                         self.last_alert['confidence'],
@@ -499,6 +534,7 @@ class DisplayStation:
                     )
                     self.blink_state = not self.blink_state
                 else:
+                    self.alert_active = False  # flashing burst done; aging takes over
                     self.show_waiting()
 
                 now = datetime.now()

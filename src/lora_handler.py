@@ -43,8 +43,22 @@ class LoRaHandler:
 
             time.sleep(3)  # Wait for module to be ready on cold boot
 
-            # Test communication
-            response = self._send_command("AT")
+            # Test communication. The old code did a SINGLE "AT" check here — but on cold boot
+            # that one shot occasionally missed even though the module was healthy (verified by
+            # manual AT test), leaving lora_available=False and silently disabling sends for the
+            # whole run. Retry a few times so a slightly-slow/flaky module still gets detected.
+            max_attempts = 5
+            response = None
+            for attempt in range(1, max_attempts + 1):
+                response = self._send_command("AT")
+                if response and "+OK" in response:
+                    if attempt > 1:
+                        logger.info(f"LoRa responded on attempt {attempt}/{max_attempts}")
+                    break
+                logger.debug(f"LoRa AT check {attempt}/{max_attempts} got: {response!r}")
+                if attempt < max_attempts:
+                    time.sleep(1)  # give the module another second, then retry
+
             if response and "+OK" in response:
                 self.lora_available = True
 
@@ -56,7 +70,12 @@ class LoRaHandler:
 
                 logger.info(f"LoRa initialized: Network ID={network_id}, Frequency={frequency}MHz")
             else:
-                logger.warning("LoRa module not responding")
+                # Make the consequence EXPLICIT in the log — a failed run used to look silent,
+                # so we could never tell afterward whether messages were actually being sent.
+                logger.warning(
+                    f"LoRa module not responding after {max_attempts} attempts — "
+                    f"LoRa DISABLED for this run, NO messages (heartbeats/alerts) will be sent."
+                )
 
         except Exception as e:
             logger.error(f"Failed to initialize LoRa: {e}")
