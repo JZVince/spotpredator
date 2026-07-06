@@ -12,6 +12,9 @@ This is my first Raspberry Pi, computer vision, and soldering project — built 
 
 The system consists of two devices. Field detector code lives in `src/`, display station code lives in `display_station/`.
 
+![Uploading IMG_7605.jpeg…]()
+
+
 **Field Detector** — deployed outdoors near your animals
 - Captures images on a scan interval using an Arducam Camera Module 3
 - Runs AI inference locally using a fine-tuned **YOLO11n** object-detection TFLite model
