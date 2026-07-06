@@ -1,8 +1,13 @@
 #!/bin/bash
 # WiFi reconnect for the field device — gentle, ESCALATING recovery with persistent diagnostics.
 #
-# Runs ONCE PER HOUR, on the hour, via cron:
-#   0 * * * * /bin/bash /home/pi/spotpredator/scripts/wifi_reconnect.sh >> /home/pi/spotpredator/data/logs/wifi_reconnect.log 2>&1
+# Runs EVERY 20 MINUTES via cron (was hourly; sped up 2026-07-06 for the diagnostic phase — to
+# gather signal-strength data faster and attempt recovery sooner):
+#   */20 * * * * /bin/bash /home/pi/spotpredator/scripts/wifi_reconnect.sh >> /home/pi/spotpredator/data/logs/wifi_reconnect.log 2>&1
+# NOTE ON THRASH RISK: at 20-min cadence WITH recovery, a device left OUT OF RANGE all day would
+# attempt NM restart / driver reload up to 3x/hour. That's far lighter than the old 3-min loop
+# that overheated the Pi, but heavier than hourly. Acceptable for now while we diagnose; revisit
+# once the signal data tells us whether the real problem is distance (range) or a driver wedge.
 #
 # --- BACKGROUND (why this script looks the way it does) -------------------------------------
 # Long debugging session (2026-07-05) established the following, so we don't re-chase ghosts:
@@ -58,17 +63,29 @@ diag() { echo "$(date '+%Y-%m-%d %H:%M:%S') | $1" | tee -a "$DIAG_LOG"; }
 online() { ping -c 1 -W 3 "$PING_IP" &>/dev/null; }
 
 # Snapshot of useful state for post-mortem diagnosis.
+# 2026-07-06: added SIGNAL strength — this is the key discriminator between the two theories:
+#   * DISTANCE (device ~100m out, marginal WiFi): offline events happen at WEAK signal. The
+#     driver is healthy; it just can't hold a link that far. No fix but antenna/range.
+#   * DRIVER WEDGE: offline persists even at STRONG signal, and the kernel log shows brcmfmac
+#     errors. THAT is what a restart/reload/reboot should fix.
+# So we log the signal of TARGET_SSID on every offline event. A run of "offline + weak signal"
+# says range; "offline + strong signal" says wedge. We are NOT changing recovery behavior yet —
+# just gathering the data to decide correctly.
 snapshot() {
-    local temp ssid_visible nm_ts
+    local temp ssid_line ssid_visible signal nm_ts
     temp="$(vcgencmd measure_temp 2>/dev/null)"
-    if nmcli -t -f SSID device wifi list --rescan yes 2>/dev/null | grep -qx "$TARGET_SSID"; then
+    # Grab the SSID's scan line WITH its signal (0-100). One scan, reused for both checks.
+    ssid_line="$(nmcli -t -f SSID,SIGNAL device wifi list --rescan yes 2>/dev/null | grep "^${TARGET_SSID}:")"
+    if [ -n "$ssid_line" ]; then
         ssid_visible="YES"
+        signal="${ssid_line##*:}"   # part after the last colon = SIGNAL value
     else
         ssid_visible="NO"
+        signal="n/a"
     fi
     nm_ts="$(systemctl show NetworkManager -p ActiveEnterTimestamp --value 2>/dev/null)"
-    diag "  state: ${temp} | SSID '$TARGET_SSID' visible=$ssid_visible | NM_last_start=$nm_ts"
-    # Export for the caller to branch on.
+    diag "  state: ${temp} | SSID '$TARGET_SSID' visible=$ssid_visible signal=${signal} | NM_last_start=$nm_ts"
+    # Export for the caller to branch on (unchanged logic — diagnosis only).
     SSID_VISIBLE="$ssid_visible"
 }
 
