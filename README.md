@@ -12,6 +12,9 @@ This is my first Raspberry Pi, computer vision, and soldering project — built 
 
 The system consists of two devices. Field detector code lives in `src/`, display station code lives in `display_station/`.
 
+> 🎮 **Try the model live** — play with the latest predator detector in your browser (no setup):
+> **https://huggingface.co/spaces/JZVince/spotpredator**
+
 ![SpotPredator in the field](img/spotpredator_001.jpeg)
 
 
@@ -79,6 +82,9 @@ converted to TensorFlow Lite (FP16) for on-device inference on the Pi Zero 2 W.
 
 The model is published on Hugging Face (with usage code, classes, and limitations):
 👉 **https://huggingface.co/JZVince/predator_v2_fp16**
+
+Or try it interactively in your browser — upload an image and see the detections:
+👉 **https://huggingface.co/spaces/JZVince/spotpredator**
 
 **Small-object optimization**: predators often occupy only 20–40 px in a 1920×1080 frame.
 The pipeline crops the sky band (keeping a 1920×640 ground strip) and tiles it into three
