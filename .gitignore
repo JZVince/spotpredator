@@ -23,5 +23,9 @@ PROJECT_LOG.txt
 # Conference paper (draft)
 PAPER.md
 
+# Planning notes (personal, not for the repo)
+MODEL_OPTIONS.md
+WEBAPP_PLANNING.md
+
 # Mac
 .DS_Store

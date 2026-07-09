@@ -47,7 +47,7 @@ alerts:
   log_path: "data/logs/detections.log"
 
 detection:
-  check_interval: 20  # Seconds between each check
+  check_interval: 15  # Seconds between each check
   cooldown_period: 180  # Wait 3 minutes before alerting again for same animal type
 
   # Schedule: Only detect during these hours

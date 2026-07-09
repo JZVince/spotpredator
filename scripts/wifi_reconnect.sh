@@ -1,142 +1,133 @@
 #!/bin/bash
-# WiFi reconnect for the field device — gentle, ESCALATING recovery with persistent diagnostics.
+# WiFi reconnect for the field device — light recovery + persistent diagnostics.
 #
-# Runs EVERY 20 MINUTES via cron (was hourly; sped up 2026-07-06 for the diagnostic phase — to
-# gather signal-strength data faster and attempt recovery sooner):
-#   */20 * * * * /bin/bash /home/pi/spotpredator/scripts/wifi_reconnect.sh >> /home/pi/spotpredator/data/logs/wifi_reconnect.log 2>&1
-# NOTE ON THRASH RISK: at 20-min cadence WITH recovery, a device left OUT OF RANGE all day would
-# attempt NM restart / driver reload up to 3x/hour. That's far lighter than the old 3-min loop
-# that overheated the Pi, but heavier than hourly. Acceptable for now while we diagnose; revisit
-# once the signal data tells us whether the real problem is distance (range) or a driver wedge.
+# Runs ONLY at night (21:00, 21:15, 21:30), when the user brings the device INDOORS. There is NO
+# daytime run: out in the field the device is off-grid and WiFi simply won't reconnect (LoRa is
+# the field link), so checking during the day is pointless — it just adds heat + log noise.
+#   0,15,30 21 * * * /bin/bash /home/pi/spotpredator/scripts/wifi_reconnect.sh >> /home/pi/spotpredator/data/logs/wifi_reconnect.log 2>&1
+# At 21:00 and 21:15 it tries to restore WiFi (NM restart); if still offline by the 2nd try it
+# REBOOTS (the only reliable wedge fix, and safe now because the device is indoors). 21:30 = final
+# catch. History: was hourly, then */20 for the 2026-07-06 diagnostic phase (cooked Pi to 80°C).
 #
-# --- BACKGROUND (why this script looks the way it does) -------------------------------------
-# Long debugging session (2026-07-05) established the following, so we don't re-chase ghosts:
-#   * The old log showed two lines with the SAME timestamp ("restarting" then "still offline"),
-#     which looked like the sleep was skipped. IT WASN'T — LOG_PREFIX was captured ONCE at the
-#     top and reused, so both echoes printed the start time. Bench test proved the script really
-#     runs ~42s (30s sleep + ping timeouts) and DOES restart NM. Fixed here: every log line now
-#     stamps its own real time via log().
-#   * NM restart works from cron / stripped env / by hand (all verified). sudo NOPASSWD works.
-#   * Many field "offline" hours were simply OUT OF RANGE (no AP) — nothing to fix.
-#   * BUT a real NM restart + 30s wait was still observed to leave the device offline sometimes,
-#     i.e. an occasional genuine wedge a service restart can't clear. Hence escalation below.
+# --- ROOT CAUSE (finally identified 2026-07-06) --------------------------------------------
+# The BCM43430 WiFi firmware's internal ROAMING ENGINE was the culprit. At marginal signal the
+# firmware attempts back-to-back re-association, which can HALT the chip firmware — a full WiFi
+# "wedge" where the driver can't even scan (looks identical to "out of range": visible=NO).
+# FIX = disable the roaming engine: /etc/modprobe.d/brcmfmac.conf -> `options brcmfmac roamoff=1`
+# (verify: `sudo cat /sys/module/brcmfmac/parameters/roamoff` == 1). This PREVENTS the wedge.
+# Ref: github.com/twpure110/pi-zero2w-wifi-brcmfmac-fix. Also keep >=10s between reconnect tries.
 #
-# --- ESCALATION (least disruptive first; only escalate if the network is actually IN RANGE) --
-#   L1  restart NetworkManager                     (fixes NM/wpa_supplicant wedges)
-#   L2  reload brcmfmac kernel WiFi driver          (fixes a frozen driver, no reboot)
-#   We DO NOT auto-reboot. If L1+L2 fail while the SSID is visible, we log a strong "REBOOT
-#   RECOMMENDED" marker to the persistent diagnostics log for a human to act on. Auto-reboot was
-#   rejected because out-in-the-field the device is legitimately out of range most of the time,
-#   and rebooting hourly for that would be pure harm.
+# --- WHY NO DRIVER-RELOAD RECOVERY ----------------------------------------------------------
+# `modprobe -r brcmfmac` CANNOT unload on this board — returns "Module is in use" even with NM +
+# wpa_supplicant stopped, wlan0 down, p2p iface deleted, and roamoff=1 set (combo WiFi/BT driver
+# never releases its refcount on a running system). So a TRUE wedge can only be cleared by a
+# REBOOT. There is intentionally no driver-reload step.
 #
-# Escalation only runs when the target SSID is VISIBLE in a scan. If it's not visible, the device
-# is simply out of range — we log that and exit, touching nothing.
+# --- WHAT THIS SCRIPT DOES ------------------------------------------------------------------
+#   online?            -> reset fail counter, exit.
+#   offline?           -> log snapshot (temp/signal/NM), then L1: restart NetworkManager.
+#   still offline?     -> increment a consecutive-failure counter. If ENABLE_REBOOT=1 and we've
+#                         failed REBOOT_AFTER_FAILS times in a row, REBOOT (the only wedge fix).
+#   No SSID "in range" gating: a wedge can't scan, so visible=NO can't distinguish wedge from
+#   out-of-range. Signal/visibility is logged for diagnosis only, never used to skip recovery.
 #
-# --- SUDOERS ---------------------------------------------------------------------------------
-# As of 2026-07-05 the broad `NOPASSWD: ALL` rule was REMOVED (tightened). `pi` now only has
-# passwordless sudo for the specific commands this script needs, in /etc/sudoers.d/wifi-reconnect:
+# --- SUDOERS (/etc/sudoers.d/wifi-reconnect) ------------------------------------------------
 #   pi ALL=(ALL) NOPASSWD: /bin/systemctl restart NetworkManager
-#   pi ALL=(ALL) NOPASSWD: /usr/sbin/modprobe -r brcmfmac
-#   pi ALL=(ALL) NOPASSWD: /usr/sbin/modprobe brcmfmac
-#   pi ALL=(ALL) NOPASSWD: /usr/sbin/ip link set wlan0 down     # <-- ADD for L2 (see below)
-# Paths must be EXACT now that the blanket rule is gone (modprobe/ip are in /usr/sbin here, not
-# /sbin). Everything else requires the pi password.
+#   pi ALL=(ALL) NOPASSWD: /bin/systemctl reboot        # only needed if ENABLE_REBOOT=1
+# (The old modprobe/ip rules are no longer used — driver reload was removed.)
 
 # --- Paths ----------------------------------------------------------------------------------
-# Regular hourly log (cron redirects stdout here) — NOTE: this file is TRUNCATED weekly by the
-# detection service's Monday cleanup (main.py). Do not rely on it for long-term diagnosis.
-#
-# Persistent diagnostics log — written to ONLY when something notable happens (offline event,
-# restart, escalation). NOT in main.py's weekly-cleanup list, so it survives both reboots and
-# the weekly wipe. This is the file to read after a field failure.
+# The cron-redirected log (wifi_reconnect.log) is TRUNCATED weekly by main.py's Monday cleanup.
+# The persistent diagnostics log below is NOT in that cleanup list, so it survives reboots and
+# the weekly wipe — this is the file to read after a field failure.
 DIAG_LOG="/home/pi/spotpredator/data/logs/wifi_diagnostics.log"
 
-TARGET_SSID="ogarward-24"   # SSID of the home-wifi profile (profile name "home-wifi")
+TARGET_SSID="ogarward-24"   # home SSID — logged for diagnostics only (signal strength), not gating
 PING_IP="8.8.8.8"
 
+# --- Reboot escalation config ---------------------------------------------------------------
+# A true WiFi wedge on this board can ONLY be cleared by a reboot (the driver can't be unloaded).
+# We DO NOT want a full OS reboot while the device is working OUTSIDE during the day (it would
+# interrupt detection for no reason — the field link is LoRa, not WiFi). So reboot is restricted
+# to a NIGHT WINDOW: the user brings the device indoors ~9pm, and that's exactly when WiFi should
+# come back. If NM still can't reconnect inside that window, a reboot is warranted and welcome.
+ENABLE_REBOOT=1             # reboot IS allowed inside the night window (device is indoors then).
+REBOOT_WINDOW_START="21:00" # earliest a reboot may happen (user brings device in ~9pm)
+REBOOT_WINDOW_END="21:30"   # latest — the script only runs 21:00/21:15/21:30 (see cron), indoors
+REBOOT_AFTER_FAILS=2        # 21:00 try, 21:15 try; if still offline by the 2nd, reboot (21:30 = final catch)
+FAILCOUNT_FILE="/home/pi/spotpredator/data/logs/.wifi_failcount"  # reset to 0 whenever online
+
 # --- Helpers --------------------------------------------------------------------------------
-# log() -> hourly log (stdout, captured by cron). Fresh timestamp EACH call (the old bug fix).
-log()  { echo "$(date '+%Y-%m-%d %H:%M:%S') | $1"; }
-# diag() -> persistent diagnostics file AND stdout, so a notable event lands in both.
+# diag() -> timestamped line to the persistent diagnostics file AND stdout (cron log).
 diag() { echo "$(date '+%Y-%m-%d %H:%M:%S') | $1" | tee -a "$DIAG_LOG"; }
 
 online() { ping -c 1 -W 3 "$PING_IP" &>/dev/null; }
 
-# Snapshot of useful state for post-mortem diagnosis.
-# 2026-07-06: added SIGNAL strength — this is the key discriminator between the two theories:
-#   * DISTANCE (device ~100m out, marginal WiFi): offline events happen at WEAK signal. The
-#     driver is healthy; it just can't hold a link that far. No fix but antenna/range.
-#   * DRIVER WEDGE: offline persists even at STRONG signal, and the kernel log shows brcmfmac
-#     errors. THAT is what a restart/reload/reboot should fix.
-# So we log the signal of TARGET_SSID on every offline event. A run of "offline + weak signal"
-# says range; "offline + strong signal" says wedge. We are NOT changing recovery behavior yet —
-# just gathering the data to decide correctly.
+# Log a state snapshot for post-mortem diagnosis: temp, whether the home SSID is visible + its
+# signal strength (0-100), and when NetworkManager last (re)started. Diagnostic only — does not
+# affect behavior. Signal helps distinguish a weak/marginal link from a healthy one after the fact.
 snapshot() {
-    local temp ssid_line ssid_visible signal nm_ts
+    local temp ssid_line visible signal nm_ts
     temp="$(vcgencmd measure_temp 2>/dev/null)"
-    # Grab the SSID's scan line WITH its signal (0-100). One scan, reused for both checks.
+    nm_ts="$(systemctl show NetworkManager -p ActiveEnterTimestamp --value 2>/dev/null)"
     ssid_line="$(nmcli -t -f SSID,SIGNAL device wifi list --rescan yes 2>/dev/null | grep "^${TARGET_SSID}:")"
     if [ -n "$ssid_line" ]; then
-        ssid_visible="YES"
-        signal="${ssid_line##*:}"   # part after the last colon = SIGNAL value
+        visible="YES"; signal="${ssid_line##*:}"   # part after the last colon = SIGNAL value
     else
-        ssid_visible="NO"
-        signal="n/a"
+        visible="NO"; signal="n/a"
     fi
-    nm_ts="$(systemctl show NetworkManager -p ActiveEnterTimestamp --value 2>/dev/null)"
-    diag "  state: ${temp} | SSID '$TARGET_SSID' visible=$ssid_visible signal=${signal} | NM_last_start=$nm_ts"
-    # Export for the caller to branch on (unchanged logic — diagnosis only).
-    SSID_VISIBLE="$ssid_visible"
+    diag "  state: ${temp} | SSID '$TARGET_SSID' visible=$visible signal=${signal} | NM_last_start=$nm_ts"
 }
 
 # --- 0) Already online? Nothing to do (cheap, no scan, no disk write) ------------------------
 if online; then
+    rm -f "$FAILCOUNT_FILE"   # healthy → clear the consecutive-failure counter
     exit 0
 fi
 
-# --- Offline: begin diagnosis + escalation --------------------------------------------------
+# --- Offline: log a snapshot, then attempt recovery. NO range/wedge gating. -----------------
+# We do NOT gate on SSID visibility anymore. A wedged BCM43430 can't complete a scan, so a wedge
+# looks identical to "out of range" (both give visible=NO). The scan/signal is logged for
+# diagnostics only. We just try to recover; if genuinely out of range, an NM restart is harmless.
 diag "OFFLINE detected — beginning recovery."
-snapshot   # sets SSID_VISIBLE, logs temp + visibility + NM start time
-
-# If the network isn't even in range, there is nothing a restart can fix. Log and stop.
-if [ "$SSID_VISIBLE" = "NO" ]; then
-    diag "  '$TARGET_SSID' NOT in range → out of range, not a wedge. No action taken."
-    exit 0
-fi
+snapshot   # logs temp + SSID visibility + signal + NM start time (diagnostic only)
 
 # --- L1: restart NetworkManager -------------------------------------------------------------
-diag "  L1: restarting NetworkManager (SSID is in range, so a wedge is plausible)..."
+diag "  L1: restarting NetworkManager..."
 sudo systemctl restart NetworkManager
-rc=$?
-diag "  L1: restart returned rc=$rc; NM_last_start=$(systemctl show NetworkManager -p ActiveEnterTimestamp --value)"
-sleep 30
+diag "  L1: NM_last_start=$(systemctl show NetworkManager -p ActiveEnterTimestamp --value)"
+sleep 30   # >=10s spacing (brcmfmac firmware halts under back-to-back re-association)
 if online; then
     diag "  RECOVERED at L1 (NetworkManager restart)."
+    rm -f "$FAILCOUNT_FILE"
     exit 0
 fi
 
-# --- L2: reload the brcmfmac kernel WiFi driver ---------------------------------------------
-diag "  L1 failed (still offline). L2: reloading brcmfmac WiFi driver..."
-# Bring the interface DOWN first: `modprobe -r brcmfmac` fails with "Module is in use" while
-# wlan0 is up and carrying traffic (observed on the bench). Downing wlan0 releases the driver
-# so it can actually unload. NM autoconnect brings wlan0 back up after the driver reloads.
-# Absolute paths: cron's minimal PATH may not include /usr/sbin, so bare command names can be
-# "command not found" under cron even though they work in an interactive shell.
-sudo /usr/sbin/ip link set wlan0 down 2>>"$DIAG_LOG"
-sleep 2
-sudo /usr/sbin/modprobe -r brcmfmac 2>>"$DIAG_LOG"
-sleep 3
-sudo /usr/sbin/modprobe brcmfmac 2>>"$DIAG_LOG"
-sleep 30
-if online; then
-    diag "  RECOVERED at L2 (brcmfmac driver reload)."
-    exit 0
+# --- L1 (NM restart) failed. The only remaining wedge fix is a REBOOT -----------------------
+# There is deliberately no driver-reload step: `modprobe -r brcmfmac` can't unload on this board
+# (see header). We reboot only after REBOOT_AFTER_FAILS consecutive failures AND only inside the
+# night window, so a reboot never happens while the device is out working during the day.
+fails=0
+[ -f "$FAILCOUNT_FILE" ] && fails=$(cat "$FAILCOUNT_FILE" 2>/dev/null || echo 0)
+fails=$((fails + 1))
+echo "$fails" > "$FAILCOUNT_FILE"
+diag "  L1 failed. Consecutive failed recoveries: $fails (reboot threshold: $REBOOT_AFTER_FAILS)."
+
+# Are we inside the allowed night window? (string HH:MM compares fine for a same-day window.)
+now_hm="$(date '+%H:%M')"
+in_window=0
+if [[ "$now_hm" > "$REBOOT_WINDOW_START" || "$now_hm" == "$REBOOT_WINDOW_START" ]] \
+   && [[ "$now_hm" < "$REBOOT_WINDOW_END" || "$now_hm" == "$REBOOT_WINDOW_END" ]]; then
+    in_window=1
 fi
 
-# --- L1 + L2 both failed, and the SSID WAS visible → genuine deep wedge ----------------------
-# We do NOT auto-reboot. Record a strong marker + a fresh snapshot for a human to decide.
-diag "  L2 failed — STILL OFFLINE with SSID in range. ***REBOOT RECOMMENDED*** (deep wedge)."
-snapshot
-diag "  (No auto-reboot by design. If you see repeated REBOOT RECOMMENDED markers, consider"
-diag "   enabling an L3 reboot or investigating the brcmfmac driver.)"
+if [ "$ENABLE_REBOOT" = "1" ] && [ "$fails" -ge "$REBOOT_AFTER_FAILS" ] && [ "$in_window" = "1" ]; then
+    diag "  In night window ($REBOOT_WINDOW_START-$REBOOT_WINDOW_END) & threshold reached — rebooting to clear a wedged WiFi driver (device is indoors; only reliable fix)."
+    rm -f "$FAILCOUNT_FILE"
+    sudo systemctl reboot
+elif [ "$ENABLE_REBOOT" = "1" ] && [ "$fails" -ge "$REBOOT_AFTER_FAILS" ]; then
+    diag "  STILL OFFLINE & threshold reached, but NOT in night window ($REBOOT_WINDOW_START-$REBOOT_WINDOW_END) — NOT rebooting (device likely still outside/working). Will reboot in the window if still failing."
+else
+    diag "  STILL OFFLINE. ***No action beyond NM restart.***"
+fi
 exit 1

@@ -193,12 +193,24 @@ def main():
             return True
         return _start_time <= rtc.get_time().time() <= _end_time
 
+    def get_cpu_temp():
+        """Read the Pi CPU temperature as a short string like '58C', or '' if unavailable.
+        Uses the sysfs thermal file (no subprocess); value is in millidegrees C."""
+        try:
+            with open('/sys/class/thermal/thermal_zone0/temp') as f:
+                return f"{int(f.read().strip()) // 1000}C"
+        except Exception:
+            return ''
+
     def send_heartbeat():
-        """Send heartbeat LoRa message every 30 minutes — a pure 'field device is alive' ping.
-        Predator timing lives entirely on the station now: the station ages each PREDATOR alert
-        it receives ('seen N min ago') for 10 min. Heartbeats no longer carry predator info."""
+        """Send heartbeat LoRa message every 30 minutes — a 'field device is alive' ping that
+        also reports CPU temperature. Predator timing lives entirely on the station now (it ages
+        each PREDATOR alert it receives). Temp is appended INSIDE the status field (not a new
+        comma field) so the station's existing 3-part HEARTBEAT parser is unaffected."""
         now = rtc.get_time()
-        msg = f"HEARTBEAT,Field is clear,{now.strftime('%H:%M')}"
+        temp = get_cpu_temp()
+        status = f"Field is clear {temp}".rstrip() if temp else "Field is clear"
+        msg = f"HEARTBEAT,{status},{now.strftime('%H:%M')}"
         lora.send_message(msg)
         logger.info(f"💓 Heartbeat sent: {msg} on {now.strftime('%Y-%m-%d')}")
 

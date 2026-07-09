@@ -1,5 +1,6 @@
 """TensorFlow Lite Detector for Predator Detection - supports YOLO and classification models"""
 import logging
+import time
 import numpy as np
 try:
     from tflite_runtime.interpreter import Interpreter
@@ -47,8 +48,37 @@ class PredatorDetector:
 
         self._last_probs = None  # Cache last inference probabilities
 
+        # --- Per-tile speed tracking ---------------------------------------------------------
+        # Times the FULL pipeline per detect() call (preprocess + invoke + decode) so we can see
+        # the real cost each tile puts on the Pi. last_inference_ms is the most recent call;
+        # the rolling stats let us log a periodic average without spamming every tile. Handy for
+        # comparing models (YOLO vs NanoDet vs PicoDet) and for spotting slowdowns/thermal throttle.
+        self.last_inference_ms = 0.0
+        self._time_total_ms = 0.0
+        self._time_count = 0
+        self._time_max_ms = 0.0
+        self._log_every = 100   # log a rolling summary every N detect() calls (0 = never)
+
         logger.info(f"Detector initialized: {self.input_width}x{self.input_height} ({self.model_type})")
         logger.info(f"Loaded {len(self.labels)} labels")
+
+    def get_speed_stats(self, reset=False):
+        """Return rolling inference-speed stats since the last reset:
+        {'last_ms', 'avg_ms', 'max_ms', 'count', 'fps'}. Set reset=True to zero the accumulator."""
+        count = self._time_count
+        avg = (self._time_total_ms / count) if count else 0.0
+        stats = {
+            'last_ms': round(self.last_inference_ms, 1),
+            'avg_ms': round(avg, 1),
+            'max_ms': round(self._time_max_ms, 1),
+            'count': count,
+            'fps': round(1000.0 / avg, 2) if avg > 0 else 0.0,
+        }
+        if reset:
+            self._time_total_ms = 0.0
+            self._time_count = 0
+            self._time_max_ms = 0.0
+        return stats
 
     def _load_labels(self, labels_path):
         """Load class labels from file"""
@@ -211,7 +241,11 @@ class PredatorDetector:
         """
         Run detection/classification on image.
         Returns list of detections: [{'class': 'predator', 'confidence': 0.98}, ...]
+
+        Times the full pipeline (preprocess + invoke + decode) per call. The elapsed ms is stored
+        on self.last_inference_ms and folded into rolling stats (see get_speed_stats()).
         """
+        t0 = time.perf_counter()
         try:
             self._last_probs = None  # Reset cache
             input_data = self._preprocess_image(image)
@@ -232,6 +266,19 @@ class PredatorDetector:
         except Exception as e:
             logger.error(f"Detection failed: {e}")
             return []
+        finally:
+            # Record timing even if decode raised, so stats reflect real per-tile cost.
+            self.last_inference_ms = (time.perf_counter() - t0) * 1000.0
+            self._time_total_ms += self.last_inference_ms
+            self._time_count += 1
+            if self._time_max_ms < self.last_inference_ms:
+                self._time_max_ms = self.last_inference_ms
+            if self._log_every and self._time_count % self._log_every == 0:
+                s = self.get_speed_stats()
+                logger.info(
+                    f"⏱️  Inference speed ({self.model_type}): avg {s['avg_ms']}ms "
+                    f"({s['fps']} FPS/tile), max {s['max_ms']}ms, last {s['last_ms']}ms, n={s['count']}"
+                )
 
     def detect_predators(self, image, predator_classes=None, ignore_classes=None):
         """Detect predators in image"""
