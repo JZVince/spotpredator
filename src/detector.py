@@ -10,9 +10,13 @@ from PIL import Image
 
 logger = logging.getLogger(__name__)
 
+# PicoDet ImageNet normalization (RGB), matching PaddleDetection's NormalizeImage transform.
+_IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+_IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
 
 class PredatorDetector:
-    """TFLite detector supporting classification and YOLO11 model formats"""
+    """TFLite detector supporting classification, YOLO11 and PicoDet model formats"""
 
     def __init__(self, model_path, labels_path, confidence_threshold=0.65):
         self.model_path = model_path
@@ -37,12 +41,20 @@ class PredatorDetector:
         # Detect model format:
         # Classification: single output (1, num_classes) - softmax probabilities
         # YOLO11: single output (1, 4+num_classes, num_boxes)
+        # PicoDet: 2 outputs - boxes (1, N, 4) + per-class scores (1, num_classes, N)
         # COCO SSD: 4 outputs
         out_shape = self.output_details[0]['shape']
         if len(self.output_details) == 1 and len(out_shape) == 2:
             self.model_type = 'classification'
         elif len(self.output_details) == 1 and len(out_shape) == 3:
             self.model_type = 'yolo'
+        elif len(self.output_details) == 2:
+            # PicoDet exported without in-graph NMS: two outputs, already-decoded boxes
+            # (1, N, 4) and per-class scores (1, num_classes, N). Identify which is which
+            # by the trailing dim (boxes end in 4) so output order doesn't matter.
+            self.model_type = 'picodet'
+            self._pd_box_idx = 0 if self.output_details[0]['shape'][-1] == 4 else 1
+            self._pd_score_idx = 1 - self._pd_box_idx
         else:
             self.model_type = 'coco_ssd'
 
@@ -103,6 +115,10 @@ class PredatorDetector:
             input_data = (input_data / 127.5) - 1.0
         elif self.model_type == 'yolo':
             input_data = np.array(image, dtype=np.float32) / 255.0
+        elif self.model_type == 'picodet':
+            # /255 then ImageNet mean/std (RGB) — the `image` is already RGB here.
+            input_data = np.array(image, dtype=np.float32) / 255.0
+            input_data = ((input_data - _IMAGENET_MEAN) / _IMAGENET_STD).astype(np.float32)
         else:
             input_data = np.array(image, dtype=np.uint8)
 
@@ -179,6 +195,40 @@ class PredatorDetector:
                 'class': class_name,
                 'confidence': confidence,
                 'box': [xmin, ymin, xmax, ymax]
+            })
+
+        return self._nms(detections)
+
+    def _decode_picodet(self, boxes, scores, target_classes):
+        """Decode PicoDet output (exported with post_process=True, nms=False).
+
+        boxes:  (N, 4)  already-decoded x1,y1,x2,y2 in input-pixel space (0..640).
+        scores: (num_classes, N)  per-class confidence.
+
+        Boxes come out in the tile's own 640x640 pixel space (the tile IS the model
+        input size), so no scaling is needed — only clip to the frame. We threshold in
+        numpy first (only a handful of the ~8500 anchors survive) so the Python loop and
+        the shared class-aware NMS stay cheap on the Pi.
+        """
+        scores = scores.T                        # (N, num_classes)
+        cls_ids = scores.argmax(axis=1)
+        confs = scores.max(axis=1)
+        W, H = self.input_width, self.input_height
+
+        detections = []
+        for i in np.nonzero(confs >= self.confidence_threshold)[0]:
+            class_id = int(cls_ids[i])
+            if class_id >= len(self.labels):
+                continue
+            class_name = self.labels[class_id].lower()
+            if target_classes and class_name not in target_classes:
+                continue
+            x1, y1, x2, y2 = boxes[i]
+            detections.append({
+                'class': class_name,
+                'confidence': float(confs[i]),
+                'box': [max(0.0, min(float(x1), W)), max(0.0, min(float(y1), H)),
+                        max(0.0, min(float(x2), W)), max(0.0, min(float(y2), H))]
             })
 
         return self._nms(detections)
@@ -260,6 +310,10 @@ class PredatorDetector:
             elif self.model_type == 'yolo':
                 output = self.interpreter.get_tensor(self.output_details[0]['index'])
                 return self._decode_yolo(output, target_classes)
+            elif self.model_type == 'picodet':
+                boxes = self.interpreter.get_tensor(self.output_details[self._pd_box_idx]['index'])[0]
+                scores = self.interpreter.get_tensor(self.output_details[self._pd_score_idx]['index'])[0]
+                return self._decode_picodet(boxes, scores, target_classes)
             else:
                 return self._decode_coco_ssd(target_classes)
 

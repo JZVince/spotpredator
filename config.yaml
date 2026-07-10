@@ -7,7 +7,7 @@ camera:
   rotation: 0  # Adjust if camera is mounted upside down
 
 detector:
-  model_path: "models/predator_v2_fp16.tflite"
+  model_path: "models/predator_picodet_s640_fp16.tflite"
   labels_path: "models/labels.txt"
   confidence_threshold: 0.7
   target_classes:
@@ -37,7 +37,7 @@ hardware:
     positions: 6  # View positions split each side of center (3 right, 3 left)
     step_delay: 0.0015  # Seconds between steps
     steps_per_rev: 4096  # Half-steps per 360 deg — calibrate if rotation is off
-    degrees_per_step: 66  # Gap between positions (~camera horizontal FOV, no seam gaps)
+    degrees_per_step: 60  # Gap between positions (~camera horizontal FOV, no seam gaps)
 
 alerts:
   buzzer_enabled: false

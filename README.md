@@ -1,6 +1,6 @@
 # SpotPredator
 
-An AI-powered farm predator detection system built on Raspberry Pi Zero 2 W. SpotPredator uses a custom-trained EfficientNetB0 computer vision model to identify predators in real time, and alerts you wirelessly via LoRa radio — no internet required in the field with long range option. Free from monthly subscription plans.
+An AI-powered farm predator detection system built on Raspberry Pi Zero 2 W. SpotPredator uses a custom-trained PicoDet computer vision model to identify predators in real time, and alerts you wirelessly via LoRa radio — no internet required in the field with long range option. Free from monthly subscription plans.
 
 ---
 
@@ -20,7 +20,7 @@ The system consists of two devices. Field detector code lives in `src/`, display
 
 **Field Detector** — deployed outdoors near your animals
 - Captures images on a scan interval using an Arducam Camera Module 3
-- Runs AI inference locally using a fine-tuned **YOLO11n** object-detection TFLite model
+- Runs AI inference locally using a fine-tuned **PicoDet** object-detection TFLite model
 - **Rotating camera turret** — a 28BYJ-48 stepper sweeps the camera in a center-out pattern for wider coverage
 - Sounds a buzzer alarm on detection
 - Transmits alerts wirelessly to your home via LoRa radio
@@ -71,7 +71,7 @@ The system consists of two devices. Field detector code lives in `src/`, display
 
 ## AI Model
 
-SpotPredator uses a custom fine-tuned **YOLO11 nano (YOLO11n)** object-detection model,
+SpotPredator uses a custom fine-tuned **PicoDet** object-detection model,
 converted to TensorFlow Lite (FP16) for on-device inference on the Pi Zero 2 W.
 
 - **Input**: 640x640 RGB image
@@ -81,7 +81,7 @@ converted to TensorFlow Lite (FP16) for on-device inference on the Pi Zero 2 W.
 - **Trained on**: author-collected field images + LILA BC + GBIF imagery
 
 The model is published on Hugging Face (with usage code, classes, and limitations):
-👉 **https://huggingface.co/JZVince/predator_v2_fp16**
+👉 **https://huggingface.co/JZVince/spotpredator**
 
 Or try it interactively in your browser — upload an image and see the detections:
 👉 **https://huggingface.co/spaces/JZVince/spotpredator**
@@ -93,8 +93,9 @@ distant predators appear larger to the model. The same crop+tile is applied at t
 inference so the images match.
 
 > **Model history / lesson learned**: This project started with an EfficientNetB0 classifier
-> (`background`/`poultry`/`predator`) before moving to YOLO11n object detection for better
-> localization of small, distant animals. Key lesson: **before deploying, test your model on
+> (`background`/`poultry`/`predator`), then moved to YOLO object detection, and finally to
+> **PicoDet** — for better localization of small, distant animals and a permissive
+> (Apache-2.0) license. Key lesson: **before deploying, test your model on
 > fresh local images and confirm reasonable output.** My original classifier was silently
 > returning ~66% "background" for every scan for two weeks — I only noticed because I happened
 > to check, not because anything failed (luckily no poultry were lost in that window).
@@ -109,7 +110,7 @@ flowchart TD
         SCHED{Within active<br/>hours?}
         CAM[Arducam Module 3<br/>capture frame]
         CROP[Crop sky band →<br/>tile into 3× 640×640]
-        YOLO[YOLO11n TFLite<br/>inference on Pi Zero 2 W]
+        YOLO[PicoDet TFLite<br/>inference on Pi Zero 2 W]
         HIT{Predator<br/>detected?}
         BUZZ[Sound buzzer]
         MOTOR[Rotate camera turret<br/>to next scan position]
@@ -228,12 +229,12 @@ Copy your trained TFLite model and labels to the `models/` directory:
 
 ```
 models/
-├── predator_v2_fp16.tflite
+├── predator_picodet_s640_fp16.tflite
 └── labels.txt
 ```
 
 You can download the published model from Hugging Face:
-**https://huggingface.co/JZVince/predator_v2_fp16**
+**https://huggingface.co/JZVince/spotpredator** (see the model card for the current file)
 
 `labels.txt` contains the detection classes, one per line:
 ```
@@ -329,10 +330,11 @@ See [WIRING.md](WIRING.md) for full pin diagrams for both devices.
 
 **Project code, hardware, and 3D models:** MIT License — feel free to modify and adapt.
 
-**AI model** (`predator_v2_fp16`, published separately on Hugging Face): **AGPL-3.0**, because
-it is fine-tuned from [Ultralytics YOLO11](https://github.com/ultralytics/ultralytics) (AGPL-3.0)
-and derivative models inherit that license. See the
-[model card](https://huggingface.co/JZVince/predator_v2_fp16) for details.
+**AI model:** **Apache-2.0**. The detector is fine-tuned from
+[PicoDet](https://github.com/PaddlePaddle/PaddleDetection) (Apache-2.0), and derivative models
+inherit that permissive license — so the model is free to use, modify, and deploy commercially,
+with attribution. (Earlier versions were based on Ultralytics YOLO, which is AGPL-3.0; the switch
+to PicoDet removes any AGPL obligation.)
 
 ---
 
