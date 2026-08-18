@@ -107,6 +107,17 @@ fi
 # There is deliberately no driver-reload step: `modprobe -r brcmfmac` can't unload on this board
 # (see header). We reboot only after REBOOT_AFTER_FAILS consecutive failures AND only inside the
 # night window, so a reboot never happens while the device is out working during the day.
+now_hm="$(date '+%H:%M')"
+
+# Fresh count each night: the counter file persists across runs/reboots, but the script only runs
+# at night (21:00/21:15/21:30) and does NOT run during the day, so a stale count from a previous
+# night can survive and cause a reboot on the VERY FIRST run tonight. On the first run of the
+# night (== REBOOT_WINDOW_START), reset the counter to 0 so tonight starts clean. Then it takes
+# two ACTUAL consecutive failures the same night (21:00 -> 1, 21:15 -> 2) to reach the threshold.
+if [ "$now_hm" = "$REBOOT_WINDOW_START" ]; then
+    rm -f "$FAILCOUNT_FILE"
+fi
+
 fails=0
 [ -f "$FAILCOUNT_FILE" ] && fails=$(cat "$FAILCOUNT_FILE" 2>/dev/null || echo 0)
 fails=$((fails + 1))
@@ -114,7 +125,6 @@ echo "$fails" > "$FAILCOUNT_FILE"
 diag "  L1 failed. Consecutive failed recoveries: $fails (reboot threshold: $REBOOT_AFTER_FAILS)."
 
 # Are we inside the allowed night window? (string HH:MM compares fine for a same-day window.)
-now_hm="$(date '+%H:%M')"
 in_window=0
 if [[ "$now_hm" > "$REBOOT_WINDOW_START" || "$now_hm" == "$REBOOT_WINDOW_START" ]] \
    && [[ "$now_hm" < "$REBOOT_WINDOW_END" || "$now_hm" == "$REBOOT_WINDOW_END" ]]; then

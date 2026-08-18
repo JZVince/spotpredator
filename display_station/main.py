@@ -6,6 +6,7 @@ Receives LoRa alerts and displays on OLED screen
 import logging
 import time
 import sys
+import threading
 import smtplib
 import subprocess
 from email.mime.text import MIMEText
@@ -52,6 +53,11 @@ if os.path.exists(env_path):
                 os.environ[key.strip()] = val.strip()
 
 os.makedirs('data/logs', exist_ok=True)
+
+# Flag file written by scripts/daily_report.pl when all its email send attempts fail; the OLED
+# shows "Email Report Failure" while it exists, and the Perl script removes it on a successful send.
+EMAIL_FAIL_FLAG = 'data/logs/.email_report_failed'
+
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s | %(levelname)-8s | %(message)s',
@@ -139,6 +145,13 @@ class DisplayStation:
         self.recent_predator_time = None  # our time.time() when we learned of it
         self.PREDATOR_TTL = 600           # seconds to keep showing the predator (10 min)
 
+        # Field-ERROR tracking. Display priority is: ERROR > predator "seen N min ago" > heartbeat.
+        # An error must NOT be hidden by an in-progress predator countdown (a broken field device
+        # is more urgent). We show the error for ERROR_TTL, and it overrides the predator line.
+        self.recent_error = None          # error description text
+        self.recent_error_time = None     # our time.time() when the error arrived
+        self.ERROR_TTL = 1800             # keep showing the error for 30 min
+
         # Email and WiFi settings - loaded from .env file
         self.email_address = os.getenv("EMAIL_ADDRESS", "")
         self.email_password = os.getenv("EMAIL_PASSWORD", "")
@@ -176,16 +189,36 @@ class DisplayStation:
         # If a predator was seen within PREDATOR_TTL, show a LIVE-aged line ("coyote 74% seen
         # N min ago") recomputed here each refresh. After the TTL expires, drop it and fall back
         # to the last heartbeat status (which by then is usually "Field is clear").
+        # Status line by PRIORITY (highest first): ERROR > predator "seen N min ago" > heartbeat.
+        # Each higher tier overrides the lower ones so an urgent message is never hidden by a
+        # lower-priority one that happens to be within its window. Expired tiers self-clear.
+        now = time.time()
+
+        # Tier 3 (lowest): routine heartbeat / normal status.
         status = self.last_heartbeat_status or "Waiting..."
+
+        # Tier 2: predator "seen N min ago" (overrides heartbeat; NOT cleared by routine heartbeats).
         if self.recent_predator and self.recent_predator_time:
-            age = time.time() - self.recent_predator_time
-            if age < self.PREDATOR_TTL:
+            if (now - self.recent_predator_time) < self.PREDATOR_TTL:
                 ptype, pconf = self.recent_predator.split('_')
-                mins = int(age / 60)
+                mins = int((now - self.recent_predator_time) / 60)
                 status = f"{ptype} {pconf}% seen {mins}min ago"
             else:
-                self.recent_predator = None  # expired — revert to heartbeat status
+                self.recent_predator = None  # expired
                 self.recent_predator_time = None
+
+        # Tier 1 (highest): a recent field ERROR overrides the predator line — a broken field
+        # device is more urgent than a predator countdown.
+        if self.recent_error and self.recent_error_time:
+            if (now - self.recent_error_time) < self.ERROR_TTL:
+                status = f"⚠ FIELD ERROR: {self.recent_error}"
+            else:
+                self.recent_error = None  # expired
+                self.recent_error_time = None
+
+        # Special case above all: daily-report email failure flag (from the Perl report script).
+        if os.path.exists(EMAIL_FAIL_FLAG):
+            status = "! Email Report Failure"
         words = status.split()
         lines = []
         current = ""
@@ -254,6 +287,16 @@ class DisplayStation:
                     return {
                         'type': 'heartbeat',
                         'status': parts[1],
+                        'time': parts[2]
+                    }
+
+            # Format: ERROR,<description>,<time>  — field device reporting a fault
+            if message.startswith("ERROR,"):
+                parts = message.split(',', 2)
+                if len(parts) >= 3:
+                    return {
+                        'type': 'error',
+                        'description': parts[1],
                         'time': parts[2]
                     }
 
@@ -326,6 +369,22 @@ class DisplayStation:
                                     self.summary_stats[alert['type']] = alert['data']
                                 logger.info(f"📊 {alert['type']} received: {alert['data']}")
                                 field_logger.info(f"{alert['type']} | {alert['data']}")
+                            elif alert['type'] == 'error':
+                                # Field device reported a fault (e.g. camera failure). Highest
+                                # display priority — record it with its own timestamp so it
+                                # OVERRIDES the predator countdown (see show_waiting). Buzz + email.
+                                desc = alert['description']
+                                self.recent_error = desc
+                                self.recent_error_time = time.time()
+                                self.last_heartbeat_time = alert['time']
+                                self.alert_active = False
+                                logger.error(f"⚠️ FIELD DEVICE ERROR: {desc} at {alert['time']}")
+                                detection_logger.info(f"ERROR | {desc} | {alert['time']}")
+                                field_logger.info(f"ERROR | {desc} | {alert['time']}")
+                                self.beep(count=3, duration=0.2)
+                                # Non-blocking: email in a background thread so a slow/hung SMTP
+                                # send can't freeze the display loop.
+                                self._email_async(self.send_error_email, desc, alert['time'])
                             else:
                                 self.last_alert = alert
                                 self.alert_time = time.time()
@@ -343,7 +402,9 @@ class DisplayStation:
                                 detection_logger.info(f"PREDATOR | {alert['type']} | confidence={alert['confidence']} | {alert.get('time','')} | {alert.get('date','')}")
                                 field_logger.info(f"PREDATOR | {alert['type']} | confidence={alert['confidence']} | {alert.get('time','')} | {alert.get('date','')}")
                                 self.beep(count=1, duration=0.15)
-                                self.send_alert_email(alert)
+                                # Non-blocking: email in a background thread (see _email_async) so
+                                # a slow SMTP send on flaky WiFi can't freeze the OLED refresh.
+                                self._email_async(self.send_alert_email, alert)
                             return True
 
         except Exception as e:
@@ -391,6 +452,13 @@ class DisplayStation:
             logger.error(f"WiFi reconnect error: {e}")
             return False
 
+    def _email_async(self, fn, *args):
+        """Run an email-sending method in a daemon thread so it NEVER blocks the display loop.
+        SMTP (and its WiFi-reconnect fallback) can hang for seconds/minutes on flaky station WiFi;
+        doing it inline froze the single-threaded loop (OLED stopped refreshing). Fire-and-forget:
+        the email either goes out in the background or logs a failure — the display keeps running."""
+        threading.Thread(target=fn, args=args, daemon=True).start()
+
     def send_alert_email(self, alert):
         """Send immediate email on predator detection"""
         if not self.email_address or not self.email_password:
@@ -431,6 +499,36 @@ class DisplayStation:
                     logger.info(f"📧 Alert email sent after WiFi reconnect")
                 except Exception as e2:
                     logger.error(f"Alert email failed after reconnect: {e2}")
+
+    def send_error_email(self, description, err_time):
+        """Email the user when the field device reports a fault (e.g. camera failure)."""
+        if not self.email_address or not self.email_password:
+            return
+        subject = "⚠️ SpotPredator - Field Device Problem"
+        body = (f"The field device reported a problem:\n\n"
+                f"{description}\n"
+                f"Time: {err_time}\n\n"
+                f"The device may have stopped detecting. Check it when you can.")
+        msg = MIMEMultipart()
+        msg['From'] = self.email_address
+        msg['To'] = self.email_address
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        try:
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                server.login(self.email_address, self.email_password)
+                server.send_message(msg)
+            logger.info(f"📧 Error email sent: {description}")
+        except Exception as e:
+            logger.error(f"Failed to send error email: {e}")
+            if self.reconnect_wifi():
+                try:
+                    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                        server.login(self.email_address, self.email_password)
+                        server.send_message(msg)
+                    logger.info("📧 Error email sent after WiFi reconnect")
+                except Exception as e2:
+                    logger.error(f"Error email failed after reconnect: {e2}")
 
     def send_daily_email(self):
         """Send daily summary email at 9PM"""

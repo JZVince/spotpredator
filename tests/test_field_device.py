@@ -97,25 +97,6 @@ except Exception as e:
     check("LoRa", FAIL, str(e))
 print()
 
-# --- Buzzer ---
-print("Buzzer:")
-try:
-    buzzer_config = config.get('hardware', {}).get('buzzer', {})
-    buzzer_enabled = config.get('alerts', {}).get('buzzer_enabled', True)
-    from buzzer_handler import BuzzerHandler
-    buzzer = BuzzerHandler(gpio_pin=buzzer_config.get('gpio_pin', 27))
-    if not buzzer_enabled:
-        check("Buzzer", WARN, "Disabled in config.yaml")
-    elif buzzer.gpio_available:
-        buzzer.beep(count=1, beep_duration=0.2)
-        check("Buzzer", PASS, "Beeped once")
-        buzzer.cleanup()
-    else:
-        check("Buzzer", FAIL, "GPIO not available")
-except Exception as e:
-    check("Buzzer", FAIL, str(e))
-print()
-
 # --- Model ---
 print("Model:")
 try:

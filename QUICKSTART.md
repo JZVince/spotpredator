@@ -83,8 +83,7 @@ See [WIRING.md](WIRING.md) for details. Quick checklist:
 - [ ] Camera: Connect with 15-22 pin cable to CSI port
 - [ ] RTC: VCC→3.3V, GND→GND, SDA→Pin3, SCL→Pin5
 - [ ] LoRa: VCC→3.3V, GND→GND, RXD→Pin8, TXD→Pin10
-- [ ] Buzzer: Build transistor circuit (see WIRING.md)
-- [ ] Power: 12V battery → DC-DC converter → Pi USB
+- [ ] Power: 12V battery → solar charge controller 5V USB → Pi
 
 ### Display Station
 

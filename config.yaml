@@ -28,19 +28,15 @@ hardware:
   rtc:
     module: "ds3231"
     i2c_address: 0x68
-  buzzer:
-    gpio_pin: 27
-    duration_seconds: 3
   stepper:
     enabled: true
     pins: [5, 6, 13, 19]  # ULN2003 IN1-IN4 (BCM)
-    positions: 6  # View positions split each side of center (3 right, 3 left)
+    positions: 5  # 5 view positions: C, R1, R2, L1, L2 (2 each side of center)
     step_delay: 0.0015  # Seconds between steps
     steps_per_rev: 4096  # Half-steps per 360 deg — calibrate if rotation is off
-    degrees_per_step: 60  # Gap between positions (~camera horizontal FOV, no seam gaps)
+    degrees_per_step: 72  # 360/5 for even full-circle coverage (66° HFOV → ~6° gap between positions)
 
 alerts:
-  buzzer_enabled: false
   lora_broadcast: true
   save_images: true
   image_path: "data/detections/"

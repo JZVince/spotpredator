@@ -22,7 +22,6 @@ The system consists of two devices. Field detector code lives in `src/`, display
 - Captures images on a scan interval using an Arducam Camera Module 3
 - Runs AI inference locally using a fine-tuned **PicoDet** object-detection TFLite model
 - **Rotating camera turret** — a 28BYJ-48 stepper sweeps the camera in a center-out pattern for wider coverage
-- Sounds a buzzer alarm on detection
 - Transmits alerts wirelessly to your home via LoRa radio
 - Sends heartbeat status updates every 30 minutes to keep you updated on system status
 - Operates on a schedule (default 6:30 AM – 9:01 PM)
@@ -48,9 +47,6 @@ The system consists of two devices. Field detector code lives in `src/`, display
 | microSD card | 32GB+ recommended |
 | 5V 2.5A power supply | For indoor/bench use |
 | RYLR998 LoRa Module | 915MHz (US) / 868MHz (EU), up to 15km range |
-| SFM-27-W Piezo Buzzer | 3-27V, loud alarm |
-| 2N2222 NPN Transistor | Buzzer drive circuit |
-| 1kΩ resistor | Transistor base resistor |
 
 ### Field Detector (additional)
 | Component | Details |
@@ -66,6 +62,9 @@ The system consists of two devices. Field detector code lives in `src/`, display
 | Component | Details |
 |-----------|---------|
 | SSD1306 OLED Display | 128x64, I2C, 0.96 inch |
+| SFM-27-W Piezo Buzzer | 3-27V, loud alarm |
+| 2N2222 NPN Transistor | Buzzer drive circuit |
+| 1kΩ resistor | Transistor base resistor |
 
 ---
 
@@ -81,7 +80,7 @@ converted to TensorFlow Lite (FP16) for on-device inference on the Pi Zero 2 W.
 - **Trained on**: author-collected field images + LILA BC + GBIF imagery
 
 The model is published on Hugging Face (with usage code, classes, and limitations):
-👉 **https://huggingface.co/JZVince/spotpredator**
+👉 **https://huggingface.co/JZVince/spotpredator-picodet**
 
 Or try it interactively in your browser — upload an image and see the detections:
 👉 **https://huggingface.co/spaces/JZVince/spotpredator**
@@ -112,7 +111,6 @@ flowchart TD
         CROP[Crop sky band →<br/>tile into 3× 640×640]
         YOLO[PicoDet TFLite<br/>inference on Pi Zero 2 W]
         HIT{Predator<br/>detected?}
-        BUZZ[Sound buzzer]
         MOTOR[Rotate camera turret<br/>to next scan position]
         SLEEP[Sleep until 6:30 AM<br/>+ send daily summary]
     end
@@ -131,9 +129,9 @@ flowchart TD
     SCHED -- yes --> CAM
     SCHED -- no --> SLEEP
     CAM --> CROP --> YOLO --> HIT
-    HIT -- yes --> BUZZ --> LORA
+    HIT -- yes --> LORA
+    HIT -- yes --> MOTOR
     HIT -- no --> MOTOR
-    BUZZ --> MOTOR
     MOTOR --> SCHED
     LORA --> RX
     RX --> OLED
@@ -211,8 +209,6 @@ hardware:
   lora:
     frequency: 915              # 915 for US, 868 for EU
     network_id: 18              # Change if multiple LoRa networks nearby
-  buzzer:
-    gpio_pin: 27
 
 detection:
   check_interval: 15            # Seconds between scans
@@ -234,7 +230,7 @@ models/
 ```
 
 You can download the published model from Hugging Face:
-**https://huggingface.co/JZVince/spotpredator** (see the model card for the current file)
+**https://huggingface.co/JZVince/spotpredator-picodet** (see the model card for the current file)
 
 `labels.txt` contains the detection classes, one per line:
 ```
@@ -290,12 +286,6 @@ See [WIRING.md](WIRING.md) for full pin diagrams for both devices.
 - CR2032 battery contact is loose — press firmly and bend the spring contact
 - Replace battery if old
 - Reseat all RTC jumper wires
-
-### Buzzer beeping continuously
-- Usually caused by RTC I2C errors interfering with GPIO
-- Reseat RTC module wires and reboot
-- Check `buzzer_enabled` in `config.yaml`
-- Possible soldering issue
 
 ### Station Display Device WiFi not reconnecting
 - Run `nmcli connection show` and verify autoconnect is `yes`

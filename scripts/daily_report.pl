@@ -108,9 +108,35 @@ print "Report saved to: $report_file\n";
 # Build HTML email
 my $html = build_html($today);
 
-# Send email
+# Send email — with up to 3 attempts, 5 minutes apart (9:16, 9:21, 9:26).
+# The station's WiFi is intermittent; a single failed SMTP connect at 9:16 used to lose the whole
+# day's report (2026-07-15). Now we retry on failure and stop as soon as one send succeeds, so a
+# healthy night still sends exactly one email.
 if ($email_address && $email_password) {
-    send_email($email_address, $email_password, $today, $html);
+    my $max_attempts = 3;
+    my $retry_gap    = 300;  # seconds between attempts (5 min)
+    my $sent = 0;
+    for my $attempt (1 .. $max_attempts) {
+        print "Email attempt $attempt/$max_attempts...\n";
+        if (send_email($email_address, $email_password, $today, $html)) {
+            $sent = 1;
+            last;
+        }
+        if ($attempt < $max_attempts) {
+            print "Send failed — retrying in ", int($retry_gap/60), " min...\n";
+            sleep $retry_gap;
+        }
+    }
+    # Flag file the display_station service watches: create it on total failure so the OLED can
+    # show "Email Report Failure"; remove it on success so a recovered night clears the warning.
+    my $flag = "/home/pi/spotpredator/data/logs/.email_report_failed";
+    if ($sent) {
+        print "Report emailed.\n";
+        unlink $flag if -e $flag;
+    } else {
+        print "All $max_attempts email attempts failed — report NOT sent.\n";
+        if (open(my $fh, '>', $flag)) { print $fh $today; close($fh); }
+    }
 } else {
     print "Email not configured - skipping\n";
 }
@@ -255,7 +281,9 @@ sub send_email {
     };
     if ($@) {
         print "Failed to send email: $@\n";
+        return 0;   # signal failure so the caller can retry
     }
+    return 1;       # sent successfully
 }
 
 # Load EMAIL_ADDRESS and EMAIL_PASSWORD from .env file

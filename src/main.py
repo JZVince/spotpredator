@@ -18,7 +18,6 @@ sys.path.insert(0, str(Path(__file__).parent))
 from camera_handler import CameraHandler
 from detector import PredatorDetector
 from rtc_handler import RTCHandler
-from buzzer_handler import BuzzerHandler
 from lora_handler import LoRaHandler
 from alert_handler import AlertHandler
 from stepper_handler import StepperHandler
@@ -87,12 +86,11 @@ def main():
         rtc = RTCHandler(
             i2c_address=rtc_config.get('i2c_address', 0x68)
         )
-
-        # Buzzer
-        buzzer_config = config.get('hardware', {}).get('buzzer', {})
-        buzzer = BuzzerHandler(
-            gpio_pin=buzzer_config.get('gpio_pin', 27)
-        )
+        # Reconcile RTC <-> system clock at startup based on connectivity:
+        #   online  -> trust the NTP-synced system clock, write it to the RTC (corrects the RTC)
+        #   offline -> trust the RTC, set the system clock from it (correct time with no WiFi)
+        # After this, the RTC is accurate and get_time() (which trusts the RTC) is reliable.
+        rtc.sync_time()
 
         # LoRa
         lora_config = config.get('hardware', {}).get('lora', {})
@@ -116,7 +114,7 @@ def main():
             )
 
         # Alert handler
-        alert_handler = AlertHandler(buzzer, lora, rtc, config)
+        alert_handler = AlertHandler(lora, rtc, config)
 
         # Start camera
         if not camera.start():
@@ -135,9 +133,13 @@ def main():
         logger.info("✅ All components initialized")
         logger.info("")
 
-        # Startup beep
-        if buzzer.gpio_available:
-            buzzer.beep(count=2, beep_duration=0.1, pause_duration=0.1)
+        # Return the turret to center on startup BEFORE doing anything else. There is no position
+        # sensor, so the stepper recovered its last physical offset from disk (data/.turret_position)
+        # during init; home() now unwinds that offset back to C. This fixes the case where a crash /
+        # reboot / service-restart (e.g. the camera-failure recovery, or the night WiFi reboot) left
+        # the turret off-center — previously it would assume it was already centered and scan skewed.
+        if stepper:
+            stepper.home()
 
     except Exception as e:
         logger.error(f"Initialization failed: {e}")
@@ -160,8 +162,27 @@ def main():
     clean_detection_path = Path('data/detections_clean/')
     clean_detection_path.mkdir(parents=True, exist_ok=True)
     scan_save_counter = 0
-    scan_save_every = 5  # Save scan images every 5th cycle
+    # Save EVERY scan cycle (every position). Sampling every Nth cycle biased which positions got
+    # saved (the turret advances one position per cycle), so some directions were never captured —
+    # risking a missed predator in an un-saved direction. Saving all covers every position/scan.
+    # (Re-evaluate if disk/heat becomes an issue; weekly cleanup already prunes data/scans/.)
+    scan_save_every = 1  # 1 = save every cycle
     scan_cycle_count = 0  # Track total scan cycles for nightly summary
+
+    # Camera-failure recovery — WINDOWED failure detection.
+    # 2026-07-16 lesson: counting only CONSECUTIVE failures misses a FLAKY camera (loose CSI cable
+    # that fails-fails-succeeds-fails...). Such a camera never hits N-in-a-row, so the old logic
+    # never alerted/restarted — the device just limped at ~2.5min/cycle, stopped heartbeating, and
+    # went silent with NO warning. Now we track the last N capture OUTCOMES and trip if too many
+    # failed, whether or not perfectly consecutive.
+    from collections import deque
+    camera_outcomes = deque(maxlen=6)   # True=ok, False=failed; last 6 captures
+    CAMERA_FAIL_TRIP = 4                 # trip if >= this many of the last 6 failed
+    # Recovery policy: RESTART ONCE. Alert the station over LoRa and exit(1) so systemd restarts
+    # the service once (re-inits the camera driver cleanly). If the camera STILL fails badly after
+    # that restart, stop trying — send a "needs manual fix" alert and idle (no restart-loop when a
+    # cable is truly dead). A marker file (survives the restart) records we used our one restart.
+    CAMERA_RESTART_MARKER = 'data/.camera_restarting'
 
     # Schedule settings
     schedule_enabled = config.get('detection', {}).get('schedule_enabled', False)
@@ -320,15 +341,11 @@ def main():
                         # Ensure camera begins the day at center/start
                         if stepper:
                             stepper.home()
-                        if buzzer.gpio_available:
-                            buzzer.beep(count=1, beep_duration=0.1)
                     else:
                         logger.info("💤 Outside active detection hours - SLEEPING")
                         # Return camera to center/start so it rests untwisted overnight
                         if stepper:
                             stepper.home()
-                        if buzzer.gpio_available:
-                            buzzer.beep(count=2, beep_duration=0.1, pause_duration=0.1)
                     last_schedule_status = is_active
 
                 # If outside schedule, send summary if due then sleep until next active period
@@ -358,9 +375,66 @@ def main():
                 tiles = camera.capture_frame()
 
                 if tiles is None:
-                    logger.warning("Failed to capture frame, retrying...")
-                    time.sleep(1)
+                    # Camera-failure recovery. Do NOT touch the (possibly hung) camera — picamera2
+                    # stop()/close() can block on dead hardware (2026-07-14). Instead, once the
+                    # recent-failure RATE is too high, ALERT THE STATION then sys.exit(1) so systemd
+                    # (Restart=on-failure) does a clean full restart that re-inits the driver.
+                    camera_outcomes.append(False)
+                    fails = camera_outcomes.count(False)
+                    logger.warning(f"Failed to capture frame (recent fails: {fails}/{len(camera_outcomes)})")
+
+                    if fails >= CAMERA_FAIL_TRIP:
+                        already_restarted = Path(CAMERA_RESTART_MARKER).exists()
+                        now_hm = rtc.get_time().strftime('%H:%M')
+
+                        if not already_restarted:
+                            # First time: use our ONE restart. Alert the station, drop the marker,
+                            # and exit(1) so systemd restarts the whole service (re-inits camera).
+                            logger.error(f"Camera failing ({fails}/{len(camera_outcomes)} recent) — "
+                                         f"alerting station and restarting once for a clean recovery.")
+                            try:
+                                lora.send_message(f"ERROR,Camera failure - restarting device,{now_hm}")
+                                logger.info("📡 Sent camera-failure alert to station.")
+                            except Exception as e:
+                                logger.error(f"Failed to send camera-failure alert: {e}")
+                            try:
+                                Path(CAMERA_RESTART_MARKER).touch()  # remember we used our restart
+                            except Exception as e:
+                                logger.error(f"Could not write restart marker: {e}")
+                            # Do NOT call camera.stop() — it can hang on the dead camera.
+                            sys.exit(1)
+                        else:
+                            # Camera STILL failing after the restart → hardware needs a manual fix
+                            # (likely the CSI ribbon). Stop trying: alert, then idle so we don't
+                            # thrash in a restart loop. Manual intervention required.
+                            logger.error("Camera STILL failing after a restart — hardware fix needed "
+                                         "(check the camera cable). Not restarting again; idling.")
+                            try:
+                                lora.send_message(f"ERROR,Camera dead after restart - needs manual fix,{now_hm}")
+                                logger.info("📡 Sent 'needs manual fix' alert to station.")
+                            except Exception as e:
+                                logger.error(f"Failed to send manual-fix alert: {e}")
+                            # Idle in place (don't exit → systemd won't restart-loop). Re-send the
+                            # alert periodically so it isn't missed, but rarely (every ~30 min).
+                            while True:
+                                time.sleep(1800)
+                                try:
+                                    lora.send_message(f"ERROR,Camera still down - needs manual fix,{rtc.get_time().strftime('%H:%M')}")
+                                except Exception:
+                                    pass
+
+                    time.sleep(2)
                     continue
+
+                # Successful capture — record the good outcome (windowed), and clear the restart
+                # marker so our "one restart" budget is available again for any FUTURE failure.
+                camera_outcomes.append(True)
+                if Path(CAMERA_RESTART_MARKER).exists():
+                    try:
+                        Path(CAMERA_RESTART_MARKER).unlink()
+                        logger.info("Camera healthy again — cleared restart marker.")
+                    except Exception:
+                        pass
 
                 now_dt = rtc.get_time()
                 pos = stepper._offset_label(stepper.current_offset) if stepper else 'C'
@@ -501,7 +575,6 @@ def main():
         # Cleanup
         logger.info("Cleaning up...")
         camera.stop()
-        buzzer.cleanup()
         lora.cleanup()
         if stepper:
             stepper.cleanup()

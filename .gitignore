@@ -9,6 +9,9 @@ __pycache__/
 venv/
 
 # Data
+# Runtime state (per-device, not for repo)
+data/.turret_position
+data/.camera_restarting
 data/logs/
 data/detections/
 data/detections_clean/

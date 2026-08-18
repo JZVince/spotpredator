@@ -91,7 +91,10 @@ TXD      →  Pin 10 (GPIO 15 / RX)
 - Disable serial console in raspi-config
 - Test with: `python3 scripts/test_lora.py`
 
-### 4. SFM-27-W Buzzer (with Transistor Circuit)
+### 4. SFM-27-W Buzzer (Display Station only, with Transistor Circuit)
+
+> **Note:** The buzzer lives on the **Display Station** only. The field detector no longer
+> uses a buzzer — it alerts silently over LoRa and the station beeps on receipt.
 
 **⚠️ CRITICAL: Cannot connect buzzer directly to GPIO!**
 
@@ -214,10 +217,8 @@ SCL      →  Pin 5 (GPIO 3)
 | RTC SCL | GPIO 3 (Pin 5) | I2C Clock |
 | LoRa TX | GPIO 14 (Pin 8) | UART Transmit |
 | LoRa RX | GPIO 15 (Pin 10) | UART Receive |
-| Buzzer | GPIO 27 (Pin 13) | Via transistor |
 | Power | 3.3V (Pin 1) | For LoRa, RTC |
-| Power | 5V (Pin 2/4) | For buzzer |
-| Ground | GND (Pin 6,9,14) | Common ground |
+| Ground | GND (Pin 6,9) | Common ground |
 
 ### Home Display
 | Component | GPIO/Pin | Description |
@@ -226,8 +227,10 @@ SCL      →  Pin 5 (GPIO 3)
 | OLED SCL | GPIO 3 (Pin 5) | I2C Clock |
 | LoRa TX | GPIO 14 (Pin 8) | UART Transmit |
 | LoRa RX | GPIO 15 (Pin 10) | UART Receive |
+| Buzzer | GPIO 27 (Pin 13) | Via transistor |
 | Power | 3.3V (Pin 1) | For LoRa, OLED |
-| Ground | GND (Pin 6,9) | Common ground |
+| Power | 5V (Pin 2/4) | For buzzer |
+| Ground | GND (Pin 6,9,14) | Common ground |
 
 ---
 
@@ -244,9 +247,6 @@ i2cdetect -y 1
 
 # Test LoRa
 python3 scripts/test_lora.py
-
-# Test buzzer (CAREFUL - make sure transistor circuit is correct!)
-python3 scripts/test_buzzer.py
 ```
 
 ---
