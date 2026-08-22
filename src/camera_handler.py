@@ -31,9 +31,26 @@ class CameraHandler:
                 main={"size": self.resolution, "format": "RGB888"},
                 controls={
                     "AwbEnable": True,
+                    # AwbMode: Daylight (1). TEST 2026-08-21 (isolated) for the ORANGE/warm cast on
+                    # sun-facing positions. Full-auto AWB drifts warm when dry orange-brown grass +
+                    # pale bright sky fill the frame (little cool reference), tinting the whole image
+                    # orange; positions with green foliage/blue sky (e.g. R1) looked natural. Locking
+                    # AWB to Daylight gives CONSISTENT outdoor color across all positions regardless
+                    # of scene content. AwbEnable stays True (AwbMode selects the preset when AWB is
+                    # on). Values: 0=Auto,1=Daylight,2=Cloudy,3=Tungsten,4=Fluorescent,5=Indoor.
+                    # Revert (drop this line → back to full auto) if daylight-lock looks worse in
+                    # overcast/low light.
+                    "AwbMode": 1,
                     "NoiseReductionMode": 2,
                     "Sharpness": 2.0,
                     "AeExposureMode": 0,
+                    # AeMeteringMode: CentreWeighted was TESTED TWICE and REVERTED. 2026-08-21 test
+                    # (isolated) confirmed it does NOT help: images came out slightly MORE blurry and
+                    # it did nothing for the sun-facing quality issue. An earlier combined attempt was
+                    # also reverted. CONCLUSION: leave AeMeteringMode at DEFAULT (matrix) — do NOT
+                    # re-add. Note: the real sun-facing problem is an ORANGE/warm cast, which is a
+                    # WHITE-BALANCE issue (AWB drifting warm on dry-grass/bright-sun scenes), NOT
+                    # metering. If revisited, try AwbMode: Daylight or EV bias — not AeMeteringMode.
                     # Focus left at DEFAULT (no AfMode/LensPosition). Manual focus at LensPosition
                     # 0.05 was tested 2026-07 and did NOT improve things, so reverted. Earlier
                     # lessons: continuous AF (AfMode=2) causes lens drift; manual@0.0 was worse than

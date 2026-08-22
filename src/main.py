@@ -86,6 +86,24 @@ def main():
         rtc = RTCHandler(
             i2c_address=rtc_config.get('i2c_address', 0x68)
         )
+        # Log the RAW RTC state BEFORE sync_time() touches anything. This shows what the RTC kept on
+        # its own (its true drift/accuracy) vs. what the system clock reads — so an online NTP
+        # correction can be told apart from a real RTC fault. OSF=1 here means the RTC lost power.
+        try:
+            raw_rtc = rtc._read_time() if rtc.rtc_available else None
+            osf = rtc.osf_is_set() if rtc.rtc_available else False
+            online = rtc._has_internet()
+            logger.info("🕐 RTC at startup (BEFORE sync): "
+                        f"RTC={raw_rtc}, system={datetime.now().replace(microsecond=0)}, "
+                        f"OSF={'SET (lost power!)' if osf else 'clear'}, "
+                        f"network={'online' if online else 'offline'}")
+            if raw_rtc and online:
+                drift = (datetime.now() - raw_rtc).total_seconds()
+                logger.info(f"🕐 RTC vs system drift before NTP correction: {drift:+.1f}s "
+                            "(this much will be corrected by the online sync below)")
+        except Exception as e:
+            logger.warning(f"Could not log pre-sync RTC state: {e}")
+
         # Reconcile RTC <-> system clock at startup based on connectivity:
         #   online  -> trust the NTP-synced system clock, write it to the RTC (corrects the RTC)
         #   offline -> trust the RTC, set the system clock from it (correct time with no WiFi)
@@ -401,8 +419,15 @@ def main():
                                 Path(CAMERA_RESTART_MARKER).touch()  # remember we used our restart
                             except Exception as e:
                                 logger.error(f"Could not write restart marker: {e}")
-                            # Do NOT call camera.stop() — it can hang on the dead camera.
-                            sys.exit(1)
+                            # Exit with os._exit(), NOT sys.exit(): sys.exit() raises SystemExit which
+                            # runs the finally: cleanup block — and that calls camera.stop(), which
+                            # BLOCKS FOREVER on the hung camera (the 2026-08-18 failure: service stuck
+                            # in "Cleaning up..." and systemd never restarted it). os._exit() ends the
+                            # process immediately, skipping all cleanup, so systemd (Restart=on-failure)
+                            # sees exit code 1 and does the clean full restart that re-inits the camera.
+                            logger.error("Exiting now (os._exit) for systemd restart — skipping cleanup "
+                                         "so the hung camera's stop() cannot block the exit.")
+                            os._exit(1)
                         else:
                             # Camera STILL failing after the restart → hardware needs a manual fix
                             # (likely the CSI ribbon). Stop trying: alert, then idle so we don't

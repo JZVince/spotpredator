@@ -1,6 +1,7 @@
 """RTC Handler for DS3231 Real-Time Clock Module"""
 import logging
 import subprocess
+import time
 from datetime import datetime
 try:
     import smbus2
@@ -161,13 +162,50 @@ class RTCHandler:
 
     @staticmethod
     def _has_internet():
-        """True if the internet is reachable (so the system clock is NTP-synced and trustworthy)."""
+        """True if the internet is reachable."""
         try:
             r = subprocess.run(["ping", "-c", "1", "-W", "3", "8.8.8.8"],
                                capture_output=True, timeout=6)
             return r.returncode == 0
         except Exception:
             return False
+
+    @staticmethod
+    def _ntp_synchronized():
+        """True ONLY if the system clock has ACTUALLY been synced by NTP — not merely 'online'.
+
+        This is the fix for the 2026-08-19 bug: being online is NOT the same as the system clock
+        being correct. At startup the Pi can have internet while NTP hasn't caught up yet, so the
+        system clock is still stale (it came up from the RTC/last-known and hasn't been corrected).
+        Trusting mere connectivity then let a stale system clock (10:43) OVERWRITE a MORE-correct
+        RTC (10:52). timedatectl's NTPSynchronized flag is the real 'the clock is trustworthy now'
+        signal — it is only 'yes' once NTP has genuinely disciplined the clock."""
+        try:
+            r = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                               capture_output=True, text=True, timeout=6)
+            return r.stdout.strip().lower() in ("yes", "true", "1")
+        except Exception:
+            return False
+
+    def _wait_for_ntp(self, max_wait=45, poll=3):
+        """If we're online, give NTP a brief bounded window to finish syncing before deciding, so a
+        boot-with-WiFi actually corrects the RTC that boot instead of missing it because NTP was a
+        few seconds late. Returns True as soon as NTP is synced, or False after max_wait. Offline
+        boots skip the wait entirely (no point waiting for NTP with no network)."""
+        if self._ntp_synchronized():
+            return True
+        if not self._has_internet():
+            return False  # offline — don't waste startup time waiting for NTP that can't happen
+        logger.info(f"⏳ Online but NTP not synced yet — waiting up to {max_wait}s for it...")
+        waited = 0
+        while waited < max_wait:
+            time.sleep(poll)
+            waited += poll
+            if self._ntp_synchronized():
+                logger.info(f"✅ NTP synced after ~{waited}s.")
+                return True
+        logger.warning(f"NTP still not synced after {max_wait}s — proceeding with RTC as source of truth.")
+        return False
 
     def sync_system_from_rtc(self):
         """Set the OS system clock FROM the RTC (used when OFFLINE). Returns True on success."""
@@ -193,33 +231,43 @@ class RTCHandler:
             return False
 
     def sync_time(self):
-        """Reconcile the system clock and the RTC at startup, based on WiFi/internet state:
+        """Reconcile the system clock and the RTC at startup, gated on whether NTP has ACTUALLY
+        synchronized the system clock — NOT merely on whether there's internet.
 
-        - ONLINE  (WiFi + internet → system clock is NTP-accurate): TRUST the system clock and
-          WRITE IT TO THE RTC, so the RTC is corrected for the next offline reboot.
-        - OFFLINE (no internet → system clock may be stale after a field reboot): TRUST the RTC and
-          SET THE SYSTEM CLOCK FROM IT.
+        - NTP-SYNCED (system clock genuinely disciplined by NTP → trustworthy): TRUST the system
+          clock and WRITE IT TO THE RTC, correcting any RTC drift for the next offline reboot.
+        - NOT NTP-SYNCED (offline, OR online-but-NTP-hasn't-caught-up-yet → system clock may be
+          stale): TRUST THE RTC and set the system clock from it. Do NOT overwrite the RTC with an
+          unverified system clock.
 
-        This keeps the RTC accurate (fixed whenever WiFi is around) and keeps system time correct
-        offline (derived from the RTC). Call once at startup, before using time.
+        Why gate on NTP-sync, not connectivity (2026-08-19 fix): at boot the Pi can be ONLINE while
+        the system clock is still stale (NTP not yet synced). The old code trusted 'online' and
+        overwrote a MORE-correct RTC (10:52) with a stale system clock (10:43). NTPSynchronized is
+        the real 'clock is correct now' signal. Call once at startup, before using time.
         """
-        if self._has_internet():
-            # System clock is trustworthy (NTP). Correct the RTC from it. If OSF was set (RTC had
-            # lost power), set_time() below clears it — so being online self-heals a battery/GND
-            # blip. We still log it so a recurring OSF at every boot is visible as a real hw fault.
+        # Give NTP a brief bounded window to finish (only waits if online-but-not-yet-synced), so a
+        # WiFi boot corrects the RTC this boot instead of missing it by a few seconds.
+        if self._wait_for_ntp():
+            # System clock is genuinely NTP-accurate → correct the RTC from it. If OSF was set (RTC
+            # had lost power), set_time() below clears it — so an NTP-synced boot self-heals a
+            # battery/GND blip. Logged so a recurring OSF every boot is visible as a real hw fault.
             if self.osf_is_set():
-                logger.warning("⚠️  RTC OSF was set (lost power since last set) — online now, "
-                               "re-setting RTC from NTP and clearing OSF. If this recurs every "
-                               "boot, the backup battery/GND is faulty.")
+                logger.warning("⚠️  RTC OSF was set (lost power since last set) — NTP-synced now, "
+                               "re-setting RTC from system clock and clearing OSF. If this recurs "
+                               "every boot, the backup battery/GND is faulty.")
             sys_time = datetime.now()
-            logger.info(f"🌐 Online — trusting system clock ({sys_time}); updating RTC from it.")
+            logger.info(f"🌐 NTP-synced — trusting system clock ({sys_time}); updating RTC from it.")
             self.set_time(sys_time)
-            return "online"
+            return "ntp"
         else:
-            # Offline — RTC is the source of truth. Push it to the system clock.
-            logger.info("📴 Offline — trusting RTC; setting system clock from it.")
+            # NOT NTP-synced (offline, or NTP hasn't caught up yet) — the RTC is the source of truth.
+            # Push it to the system clock. This protects the RTC's good time from being clobbered by
+            # a not-yet-corrected system clock at boot.
+            reachable = self._has_internet()
+            logger.info(f"📴 System clock NOT NTP-synced ({'online but NTP not ready' if reachable else 'offline'}) "
+                        "— trusting RTC; setting system clock from it.")
             self.sync_system_from_rtc()
-            return "offline"
+            return "rtc"
 
     def get_timestamp_string(self, fmt="%Y-%m-%d %H:%M:%S"):
         """
