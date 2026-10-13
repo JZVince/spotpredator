@@ -77,12 +77,15 @@ echo "Service installed and enabled (will start on next boot)"
 # Step 7: Place model reminder
 echo ""
 echo "Step 7: AI Model"
-echo "Place your trained model files in $INSTALL_DIR/models/:"
-echo "  - spotpredator_classifier.tflite"
-echo "  - classifier_labels.txt"
+# Check for whatever model config.yaml points at (model_path / labels_path), not a hardcoded name.
+MODEL_REL=$(grep -E '^\s*model_path:' "$INSTALL_DIR/config.yaml" | sed -E 's/.*model_path:[[:space:]]*"?([^"#]+)"?.*/\1/' | xargs)
+LABELS_REL=$(grep -E '^\s*labels_path:' "$INSTALL_DIR/config.yaml" | sed -E 's/.*labels_path:[[:space:]]*"?([^"#]+)"?.*/\1/' | xargs)
+echo "Place your trained model files in $INSTALL_DIR/ (paths from config.yaml):"
+echo "  - $MODEL_REL"
+echo "  - $LABELS_REL"
 echo ""
-if [ ! -f "$INSTALL_DIR/models/spotpredator_classifier.tflite" ]; then
-    echo "Warning: Model file not found. Detection will not work until model is placed."
+if [ ! -f "$INSTALL_DIR/$MODEL_REL" ] || [ ! -f "$INSTALL_DIR/$LABELS_REL" ]; then
+    echo "Warning: Model or labels file not found. Detection will not work until they are placed."
 fi
 
 echo ""

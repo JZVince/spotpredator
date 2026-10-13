@@ -28,6 +28,8 @@ class LoRaHandler:
         self.frequency = frequency
         self.serial = None
         self.lora_available = False
+        self._rx_buf = ""      # partial line not yet terminated by \r\n
+        self._pending = []     # parsed +RCV messages not yet handed to poll_messages()
 
         if serial is None:
             logger.warning("pyserial not available, LoRa disabled")
@@ -96,7 +98,9 @@ class LoRaHandler:
             return None
 
         try:
-            # Clear any pending data
+            # Keep any received messages before clearing the buffer — the old code threw them away,
+            # so a station message that arrived just before one of our sends was silently lost.
+            self._drain()
             self.serial.reset_input_buffer()
 
             # Send command
@@ -104,8 +108,9 @@ class LoRaHandler:
             time.sleep(0.3)
 
             if expect_response:
-                # Read response
-                response = self.serial.read(self.serial.in_waiting or 64).decode().strip()
+                # Read response (a message received in that window is kept, not mixed into it)
+                response = self.serial.read(self.serial.in_waiting or 64).decode(errors="replace")
+                response = "\n".join(l for l in self._split_rcv(response) if l).strip()
                 logger.debug(f"Command: {command} | Response: {response}")
                 return response
 
@@ -148,7 +153,7 @@ class LoRaHandler:
             logger.error(f"Error sending message: {e}")
             return False
 
-    def send_alert(self, predator_type, confidence, timestamp, date=None):
+    def send_alert(self, predator_type, confidence, timestamp, date=None, position='C'):
         """
         Send predator alert
 
@@ -157,60 +162,71 @@ class LoRaHandler:
             confidence: Detection confidence (0-1)
             timestamp: Detection time string (HH:MM:SS)
             date: Detection date string (MM/DD/YYYY)
+            position: Turret position when detected (C, L1, L2, R1, R2)
 
         Returns:
             bool: True if sent successfully
         """
-        # Message format: PREDATOR,<type>,<time>,<confidence>,<date>
-        message = f"PREDATOR,{predator_type},{timestamp},{confidence:.2f},{date or ''}"
+        # Message format: PREDATOR,<type>,<time>,<position>,<confidence>,<date>
+        message = f"PREDATOR,{predator_type},{timestamp},{position},{confidence:.2f},{date or ''}"
         return self.send_message(message)
 
-    def receive_message(self, timeout=1):
-        """
-        Check for incoming LoRa messages
-
-        Args:
-            timeout: Timeout in seconds
-
-        Returns:
-            dict: Parsed message {'address': int, 'length': int, 'message': str, 'rssi': int, 'snr': int}
-                  or None if no message
-        """
-        if not self.lora_available or not self.serial:
+    @staticmethod
+    def _parse_rcv(line):
+        """+RCV=<address>,<length>,<data>,<RSSI>,<SNR> -> dict. <data> may itself contain commas,
+        so it is cut by <length> rather than by splitting."""
+        try:
+            addr, length, rest = line[5:].split(",", 2)
+            length = int(length)
+            data = rest[:length]
+            tail = rest[length + 1:].split(",")
+            return {"address": int(addr), "length": length, "message": data,
+                    "rssi": int(tail[0]) if tail and tail[0].lstrip("-").isdigit() else None,
+                    "snr": int(tail[1]) if len(tail) > 1 and tail[1].lstrip("-").isdigit() else None}
+        except (ValueError, IndexError):
+            logger.warning(f"Unparseable LoRa line: {line!r}")
             return None
 
+    def _split_rcv(self, text):
+        """Pull complete +RCV lines out of text into the pending queue; return the other lines."""
+        self._rx_buf += text
+        *lines, self._rx_buf = self._rx_buf.replace("\r", "").split("\n")
+        others = []
+        for line in lines:
+            if line.startswith("+RCV="):
+                parsed = self._parse_rcv(line)
+                if parsed:
+                    self._pending.append(parsed)
+            else:
+                others.append(line)
+        # Keep an unfinished +RCV line for the next read; anything else (e.g. "+OK" without its
+        # newline yet) is a command response and is returned now.
+        if not (self._rx_buf.startswith("+RCV=") or "+RCV=".startswith(self._rx_buf)):
+            others.append(self._rx_buf)
+            self._rx_buf = ""
+        return others
+
+    def _drain(self):
+        """Read whatever the module has sent us so far into the pending queue."""
+        if self.serial and self.serial.in_waiting > 0:
+            self._split_rcv(self.serial.read(self.serial.in_waiting).decode(errors="replace"))
+
+    def poll_messages(self):
+        """Return all LoRa messages received since the last call (non-blocking, cheap)."""
+        if not self.lora_available or not self.serial:
+            return []
         try:
-            # Set timeout
-            original_timeout = self.serial.timeout
-            self.serial.timeout = timeout
-
-            # Read data
-            if self.serial.in_waiting > 0:
-                data = self.serial.read(self.serial.in_waiting).decode().strip()
-
-                # Parse message: +RCV=<address>,<length>,<message>,<RSSI>,<SNR>
-                if data.startswith("+RCV="):
-                    parts = data[5:].split(',', 4)  # Split into max 5 parts
-
-                    if len(parts) >= 3:
-                        parsed = {
-                            'address': int(parts[0]),
-                            'length': int(parts[1]),
-                            'message': parts[2],
-                            'rssi': int(parts[3]) if len(parts) > 3 else None,
-                            'snr': int(parts[4]) if len(parts) > 4 else None
-                        }
-
-                        logger.info(f"Received LoRa message: {parsed['message']}")
-                        return parsed
-
-            # Restore timeout
-            self.serial.timeout = original_timeout
-
+            self._drain()
         except Exception as e:
-            logger.error(f"Error receiving message: {e}")
+            logger.error(f"Error receiving messages: {e}")
+        msgs, self._pending = self._pending, []
+        return msgs
 
-        return None
+    def receive_message(self, timeout=1):
+        """Return the next received message as a dict, or None (kept for older callers)."""
+        if not self._pending:
+            self._pending = self.poll_messages()
+        return self._pending.pop(0) if self._pending else None
 
     def cleanup(self):
         """Close serial connection"""

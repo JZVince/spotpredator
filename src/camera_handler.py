@@ -43,7 +43,23 @@ class CameraHandler:
                     "AwbMode": 1,
                     "NoiseReductionMode": 2,
                     "Sharpness": 2.0,
-                    "AeExposureMode": 0,
+                    # AeExposureMode: 1 (Short) — restored 2026-08-23 to match the documented
+                    # best-default config (commit 443092c, PROJECT_LOG "finalized June 2026"). Short
+                    # biases toward FASTER shutter = less motion blur = SHARPER images. It had drifted
+                    # to 0 (Normal, longer exposure → softer), which is why sharpness dropped vs. the
+                    # best-agreed setup. Tradeoff (known/accepted): Short underexposes a bit in low
+                    # light, but wins on sharpness in daylight — the documented right choice.
+                    "AeExposureMode": 1,
+                    # ExposureValue: +0.2 (EV bias). For DARK images — dawn/dusk and sun-facing
+                    # (backlit) frames come out underexposed: the bright sky drags the auto-exposure
+                    # meter down, and Short exposure (above) collects less light in low light. EV
+                    # bias tells AE to expose brighter than its meter target, lifting the frame so
+                    # the ground-level subject is visible. Tuning history: +1.0 (2026-08-29) was too
+                    # bright in daytime → +0.5 (2026-09-02) still a bit bright → +0.2 (2026-09-06),
+                    # a gentle lift that helps low light without washing out well-lit frames. Range
+                    # ~-8..+8 (1.0 ≈ one stop). Raise if dark frames still need it; drop to revert.
+                    # A physical lens hood is the complementary fix for sun glare (planned next case).
+                    "ExposureValue": 0.2,
                     # AeMeteringMode: CentreWeighted was TESTED TWICE and REVERTED. 2026-08-21 test
                     # (isolated) confirmed it does NOT help: images came out slightly MORE blurry and
                     # it did nothing for the sun-facing quality issue. An earlier combined attempt was

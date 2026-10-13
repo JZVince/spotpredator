@@ -42,10 +42,17 @@ class PredatorDetector:
         # Classification: single output (1, num_classes) - softmax probabilities
         # YOLO11: single output (1, 4+num_classes, num_boxes)
         # PicoDet: 2 outputs - boxes (1, N, 4) + per-class scores (1, num_classes, N)
+        # PicoDet (LibreYOLO export): single output (1, N, 4+num_classes) - xyxy + sigmoid scores
         # COCO SSD: 4 outputs
         out_shape = self.output_details[0]['shape']
+        self._pd_fused = False
         if len(self.output_details) == 1 and len(out_shape) == 2:
             self.model_type = 'classification'
+        elif len(self.output_details) == 1 and len(out_shape) == 3 and out_shape[2] < out_shape[1]:
+            # Anchors on axis 1, box+scores on axis 2 (YOLO11 is the transpose). Same ImageNet
+            # preprocessing and decode as the 2-output PicoDet — the tensor is just split in two.
+            self.model_type = 'picodet'
+            self._pd_fused = True
         elif len(self.output_details) == 1 and len(out_shape) == 3:
             self.model_type = 'yolo'
         elif len(self.output_details) == 2:
@@ -310,6 +317,9 @@ class PredatorDetector:
             elif self.model_type == 'yolo':
                 output = self.interpreter.get_tensor(self.output_details[0]['index'])
                 return self._decode_yolo(output, target_classes)
+            elif self.model_type == 'picodet' and self._pd_fused:
+                out = self.interpreter.get_tensor(self.output_details[0]['index'])[0]  # (N, 4+nc)
+                return self._decode_picodet(out[:, :4], out[:, 4:].T, target_classes)
             elif self.model_type == 'picodet':
                 boxes = self.interpreter.get_tensor(self.output_details[self._pd_box_idx]['index'])[0]
                 scores = self.interpreter.get_tensor(self.output_details[self._pd_score_idx]['index'])[0]

@@ -21,6 +21,7 @@ from rtc_handler import RTCHandler
 from lora_handler import LoRaHandler
 from alert_handler import AlertHandler
 from stepper_handler import StepperHandler
+from field_provision import FieldProvisioner
 
 # Setup logging
 logging.basicConfig(
@@ -118,6 +119,9 @@ def main():
             network_id=lora_config.get('network_id', 18),
             frequency=lora_config.get('frequency', 915)
         )
+        # WiFi credentials sent by the station over LoRa (encrypted with the kit key). No server:
+        # the loop just glances at received LoRa messages — see check_radio() below.
+        provisioner = FieldProvisioner(lora)
 
         # Stepper (camera rotation)
         stepper_config = config.get('hardware', {}).get('stepper', {})
@@ -167,6 +171,78 @@ def main():
     check_interval = config.get('detection', {}).get('check_interval', 5)
     target_classes = config.get('detector', {}).get('target_classes', ['dog', 'cat', 'bird'])
 
+    # --- Detection verification (false-positive filter, 2026-10-11) -------------------------
+    # A first-scan detection is NOT alerted straight away. The turret nudges toward where the box
+    # was (left tile -> rotate left, right tile -> right, middle -> both ways), takes a second look,
+    # returns to its original spot, and only alerts if
+    #       (first-scan conf + best second-scan conf) / 2  >=  confidence_threshold.
+    # A real animal shows up again; a one-frame fluke (shadow, leaf, glare) usually doesn't.
+    verify_cfg = config.get('detection', {}).get('verify', {})
+    verify_enabled = verify_cfg.get('enabled', True)
+    verify_shift = float(verify_cfg.get('shift_degrees', 22))      # ~one tile (66° FOV / 3)
+    verify_floor = float(verify_cfg.get('detect_floor', 0.3))      # read conf this low on rescans
+    verify_settle = float(verify_cfg.get('settle_seconds', 1.5))   # let the turret stop wobbling
+    verify_edge = float(verify_cfg.get('edge_shift_degrees', 5))   # max outward nudge at L2/R2
+    # +shift rotates the same way as positive offsets (the "L" positions). If the image's left
+    # tile ever turns out to be the scene's right, set invert_direction: true.
+    verify_sign = -1 if verify_cfg.get('invert_direction', False) else 1
+    alert_threshold = config.get('detector', {}).get('confidence_threshold', 0.65)
+
+    def verify_detection(cls, first_conf, tile_idx, tile_tag, ts):
+        """Second look at a first-scan detection. Returns (confirmed, avg_conf, best_conf).
+        Always leaves the turret exactly where it started."""
+        if not (verify_enabled and stepper and stepper.gpio_available):
+            return True, first_conf, None          # no turret -> old behaviour (alert on 1st scan)
+        if tile_idx == 0:
+            shifts = [verify_sign * verify_shift]            # box in left tile -> rotate left
+        elif tile_idx == 2:
+            shifts = [-verify_sign * verify_shift]           # box in right tile -> rotate right
+        else:
+            shifts = [verify_sign * verify_shift, -verify_sign * verify_shift]  # middle -> both
+        best_conf, best_frame, best_tag, captured = 0.0, None, '', False
+        old_thr = detector.confidence_threshold
+        try:
+            for shift in shifts:
+                moved = stepper.nudge(shift, edge_allowance=verify_edge)  # outward at L2/R2: only ~5°
+                try:
+                    time.sleep(verify_settle)
+                    tiles2 = camera.capture_frame()
+                finally:
+                    stepper.unnudge()                        # always go back to the scan position
+                if tiles2 is None:
+                    continue
+                captured = True
+                detector.confidence_threshold = verify_floor
+                for i, frame2 in enumerate(tiles2):
+                    for d in detector.detect_predators(frame2, predator_classes=[cls]):
+                        if d['class'] == cls and d['confidence'] > best_conf:
+                            best_conf, best_frame = d['confidence'], frame2
+                            best_tag = f"{tile_tag}{moved:+.0f}{'LMR'[i]}"
+                detector.confidence_threshold = old_thr
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Verification failed ({e}) — alerting on the first scan to be safe")
+            return True, first_conf, None
+        finally:
+            detector.confidence_threshold = old_thr
+            time.sleep(verify_settle)                        # settle back before normal scanning
+        if not captured:
+            logger.warning("Verification rescan got no image (camera) — alerting on the first scan")
+            return True, first_conf, None
+        avg = (first_conf + best_conf) / 2
+        confirmed = avg >= alert_threshold
+        scan_logger.info(f"verify | {cls} first={first_conf:.2f} second={best_conf:.2f} "
+                         f"avg={avg:.2f} at={best_tag or tile_tag} -> {'CONFIRMED' if confirmed else 'REJECTED'}")
+        logger.info(f"🔍 Verify {cls} [{tile_tag}]: first {first_conf:.2f}, second {best_conf:.2f}, "
+                    f"avg {avg:.2f} → {'CONFIRMED — alerting' if confirmed else 'rejected as likely false positive'}")
+        if best_frame is not None:  # keep the second-look image next to the first-scan image
+            try:
+                PILImage.fromarray(best_frame[:, :, ::-1]).save(
+                    str(clean_detection_path / f"{ts}_{best_tag}_{cls}_{int(best_conf*100)}%_verify.jpg"),
+                    quality=92)
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Failed to save verification image: {e}")
+        return confirmed, avg, best_conf
+
     # Heartbeat tracking
     hb = {'last_minute': -1}  # tracks which :00/:30 slot last fired a heartbeat
 
@@ -180,11 +256,14 @@ def main():
     clean_detection_path = Path('data/detections_clean/')
     clean_detection_path.mkdir(parents=True, exist_ok=True)
     scan_save_counter = 0
-    # Save EVERY scan cycle (every position). Sampling every Nth cycle biased which positions got
-    # saved (the turret advances one position per cycle), so some directions were never captured —
-    # risking a missed predator in an un-saved direction. Saving all covers every position/scan.
-    # (Re-evaluate if disk/heat becomes an issue; weekly cleanup already prunes data/scans/.)
-    scan_save_every = 1  # 1 = save every cycle
+    # Scan-image saving is now WINDOWED, not every-cycle (2026-09-10): raw scan images are saved only
+    # during a 5-minute window that opens AFTER a detection and RE-ARMS on each new detection. Outside
+    # the window, no scan images are saved (cuts disk/heat/wear from thousands of daily frames). NOTE:
+    # this only gates the raw data/scans/ images — detection images (clean + annotated) still save on
+    # EVERY detection regardless of the window. The window starts on the NEXT scan after a detection
+    # (the triggering scan's own scan-image is skipped; its detection image is saved separately).
+    SCAN_SAVE_WINDOW_SECONDS = 300      # 5 min of scan-image saving after a detection
+    scan_save_until = 0.0               # epoch time until which scan images are saved (0 = off)
     scan_cycle_count = 0  # Track total scan cycles for nightly summary
 
     # Camera-failure recovery — WINDOWED failure detection.
@@ -200,7 +279,29 @@ def main():
     # the service once (re-inits the camera driver cleanly). If the camera STILL fails badly after
     # that restart, stop trying — send a "needs manual fix" alert and idle (no restart-loop when a
     # cable is truly dead). A marker file (survives the restart) records we used our one restart.
+    # Recovery escalation uses TWO marker files (both cleared on the first healthy capture):
+    #   stage 1: no markers          -> service restart (os._exit → systemd re-runs main.py)
+    #   stage 2: RESTART marker set   -> full OS reboot (sudo reboot — clears kernel/driver/CSI state
+    #                                    a service restart can't; closest software gets to a power-cycle)
+    #   stage 3: REBOOT marker set    -> give up: alert "needs manual fix" and idle (no reboot loop)
     CAMERA_RESTART_MARKER = 'data/.camera_restarting'
+    CAMERA_REBOOT_MARKER = 'data/.camera_rebooted'
+
+    # Periodic post-rotation power sampling (motor-stall / rail-sag diagnostics). The ULN2003 is
+    # powered from the Pi's 5V, so a stuck motor sags the Pi rail; we sample power after every Nth
+    # rotation to catch it without spamming vcgencmd each cycle.
+    rotation_count = 0
+    POWER_CHECK_EVERY_ROTATIONS = 20    # verbose power log ~ every 20 rotations (general power probe)
+
+    # Real-motor-stall detection (distinct from the periodic power probe above). A weak 28BYJ-48 with
+    # small marginal under-rotation is EXPECTED and must be ignored — it draws no meaningful extra
+    # current. A REAL mechanical stall pulls locked-rotor current on the Pi's 5V (ULN2003 is Pi-
+    # powered) → undervolt DURING the move. We require several CONSECUTIVE undervolt-on-rotation
+    # events before alerting, so a one-off coincidental dip doesn't cry wolf. We ALERT over LoRa but
+    # NEVER stop the service — a stuck turret is not a reason to kill predator detection.
+    stall_undervolt_streak = 0
+    STALL_ALERT_STREAK = 3              # consecutive undervolt-on-rotation moves = real stall
+    stall_alerted = False              # latch so we alert once per stall episode, not every cycle
 
     # Schedule settings
     schedule_enabled = config.get('detection', {}).get('schedule_enabled', False)
@@ -240,6 +341,55 @@ def main():
                 return f"{int(f.read().strip()) // 1000}C"
         except Exception:
             return ''
+
+    def log_power_status(reason=""):
+        """Capture and LOG the Pi's power/thermal state — called on camera failures (and any
+        suspected under-power event) so we get evidence AT THE MOMENT OF FAILURE, before a manual
+        power-cycle wipes it. This targets the 2026-08 investigation: intermittent camera hangs that
+        clear only on a full unplug (not a software restart), suspected to be a marginal 5V rail from
+        the solar-USB power path. Reads:
+          - get_throttled : bitmask. 0x1=undervolt NOW, 0x2=freq-capped now, 0x4=throttled now;
+                            0x10000=undervolt OCCURRED since boot, 0x40000=throttle occurred, etc.
+                            Anything non-zero (esp. undervolt bits) = the 5V rail dipped = power fault.
+          - measure_volts : core voltage
+          - measure_temp  : SoC temperature (rules thermal in/out)
+        Uses vcgencmd via subprocess; never raises (best-effort diagnostics).
+        Returns True if UNDERVOLT-NOW (bit 0x1) is set, else False — lets the caller react (e.g. the
+        post-rotation motor-stall check treats undervolt-during-a-move as a real stall signal)."""
+        undervolt_now = False
+        try:
+            import subprocess
+
+            def _vc(arg):
+                try:
+                    r = subprocess.run(["vcgencmd", arg], capture_output=True, text=True, timeout=5)
+                    return r.stdout.strip()
+                except Exception as e:  # noqa: BLE001
+                    return f"<err:{e}>"
+
+            throttled = _vc("get_throttled")   # e.g. "throttled=0x0"
+            volts = _vc("measure_volts")        # e.g. "volt=0.8563V"
+            temp = _vc("measure_temp")          # e.g. "temp=61.2'C"
+            # Decode the throttled bitmask into a human note so the log is readable at a glance.
+            note = ""
+            try:
+                val = int(throttled.split("=")[1], 16)
+                undervolt_now = bool(val & 0x1)
+                flags = []
+                if val & 0x1:      flags.append("UNDERVOLT-NOW")
+                if val & 0x4:      flags.append("THROTTLED-NOW")
+                if val & 0x2:      flags.append("FREQCAP-NOW")
+                if val & 0x10000:  flags.append("undervolt-since-boot")
+                if val & 0x40000:  flags.append("throttled-since-boot")
+                if val & 0x20000:  flags.append("freqcap-since-boot")
+                note = (" ⚠️ " + ",".join(flags)) if flags else " (power OK)"
+            except Exception:
+                pass
+            logger.warning(f"🔌 POWER STATUS{(' [' + reason + ']') if reason else ''}: "
+                           f"{throttled} {volts} {temp}{note}")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Could not read power status: {e}")
+        return undervolt_now
 
     def send_heartbeat():
         """Send heartbeat LoRa message every 30 minutes — a 'field device is alive' ping that
@@ -335,17 +485,40 @@ def main():
                 chunk_size += len(part) + 1
             if chunk:
                 lora.send_message(f"SUMMARY3_{msg_index},{' '.join(chunk)}")
+                time.sleep(1)
+
+            # Explicit end-of-summary marker so the STATION knows the full daily summary has arrived
+            # and can fire the email report immediately — instead of the station guessing at a fixed
+            # clock time. This makes the report event-driven: it follows whatever end_hour the user
+            # sets (2026-09-18), so a user with an 8pm end gets their report right after 8pm.
+            # The SUMMARY_END send's success is what we treat as "summary delivered" for the retry
+            # logic at the call site — it's the last and most important message (triggers the report).
+            time.sleep(1)
+            ok = lora.send_message("SUMMARY_END,done")
 
             logger.info(f"📊 Summary heartbeats sent: {total} scans, peak {max_conf_class} {max_conf}%")
+            return bool(ok)
 
         except Exception as e:
             logger.error(f"Failed to send summary heartbeats: {e}")
+            return False
+
+    def check_radio():
+        """Hand any LoRa messages from the station to the WiFi provisioner. Non-blocking and cheap
+        (one serial-buffer check), so it can run every cycle without slowing detection."""
+        for m in lora.poll_messages():
+            try:
+                provisioner.handle(m['message'])
+            except Exception as e:  # never let a bad radio message break detection
+                logger.error(f"Error handling LoRa message: {e}")
 
     # Main loop — initialize to current schedule state to avoid spurious reinit on first iteration
     last_schedule_status = is_within_schedule()
     try:
         while True:
             try:
+                check_radio()
+
                 # Check if we're within active hours
                 is_active = is_within_schedule()
 
@@ -366,26 +539,46 @@ def main():
                             stepper.home()
                     last_schedule_status = is_active
 
-                # If outside schedule, send summary if due then sleep until next active period
+                # If outside schedule: send the daily summary ONCE (right when detection ends), then
+                # sleep until the next active period. The summary now fires as soon as we cross out of
+                # the schedule — NOT at a hardcoded 21:xx window (2026-09-20). This follows whatever
+                # end_hour the user sets (e.g. 8pm), so the station's event-driven report (triggered by
+                # the SUMMARY_END marker at the end of send_summary_heartbeats) also follows end_hour.
                 if not is_active:
                     now_dt = rtc.get_time()
 
-                    # Send summary if within the 21:05-21:15 window
-                    if now_dt.hour == 21 and 5 <= now_dt.minute <= 15 and summary_sent_date != now_dt.date():
-                        send_summary_heartbeats()
-                        summary_sent_date = now_dt.date()
+                    # Send the day's summary once per day, the first time we find ourselves outside
+                    # the schedule. send_summary_heartbeats() ends with the SUMMARY_END marker, which
+                    # the station uses to fire the email report immediately. RETRY up to 3 times if the
+                    # send fails (LoRa/radio hiccup), THEN give up and sleep — the device stays awake
+                    # only for these few attempts, not indefinitely (2026-09-20). The station's late
+                    # cron fallback covers the case where all 3 attempts still failed.
+                    if summary_sent_date != now_dt.date():
+                        for _attempt in range(1, 4):
+                            if send_summary_heartbeats():
+                                logger.info(f"📊 Summary delivered (attempt {_attempt}/3).")
+                                break
+                            logger.warning(f"📊 Summary send failed (attempt {_attempt}/3).")
+                            if _attempt < 3:
+                                time.sleep(10)  # brief gap between retries (LoRa needs spacing)
+                        else:
+                            logger.error("📊 Summary failed after 3 attempts — sleeping anyway; "
+                                         "station's cron fallback will still send the report.")
+                        summary_sent_date = now_dt.date()  # once/day regardless, so we don't loop
 
-                    # Wait in short intervals until summary window has passed, then sleep until 6AM
-                    if now_dt.hour == 21 and now_dt.minute < 16:
-                        time.sleep(60)  # Still in or before summary window, check every minute
-                    else:
-                        # Summary window passed, sleep precisely until next 6:00 AM
-                        next_start = now_dt.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
-                        if now_dt >= next_start:
-                            next_start += timedelta(days=1)
-                        sleep_seconds = (next_start - now_dt).total_seconds()
-                        logger.info(f"💤 Sleeping until {next_start.strftime('%H:%M')} ({int(sleep_seconds/3600)}h {int((sleep_seconds%3600)/60)}m)")
-                        time.sleep(sleep_seconds)
+                    # Sleep precisely until the next start time (6:30 AM).
+                    next_start = now_dt.replace(hour=start_hour, minute=start_minute, second=0, microsecond=0)
+                    if now_dt >= next_start:
+                        next_start += timedelta(days=1)
+                    sleep_seconds = (next_start - now_dt).total_seconds()
+                    logger.info(f"💤 Sleeping until {next_start.strftime('%H:%M')} ({int(sleep_seconds/3600)}h {int((sleep_seconds%3600)/60)}m)")
+                    # Nap in short steps instead of one long sleep, glancing at the radio between
+                    # naps — evenings are when the user brings the device in and the station sends
+                    # it WiFi details, which used to wait unheard until morning.
+                    wake_at = time.monotonic() + sleep_seconds
+                    while time.monotonic() < wake_at:
+                        check_radio()
+                        time.sleep(min(2, max(0, wake_at - time.monotonic())))
                     continue
 
                 # Within schedule - do detection
@@ -400,42 +593,72 @@ def main():
                     camera_outcomes.append(False)
                     fails = camera_outcomes.count(False)
                     logger.warning(f"Failed to capture frame (recent fails: {fails}/{len(camera_outcomes)})")
+                    # Capture power/thermal state ON EVERY capture failure — this is the evidence that
+                    # gets wiped by a manual power-cycle. If undervolt bits show here, the intermittent
+                    # camera hangs are the marginal-5V-rail (solar-USB) problem, not the camera.
+                    log_power_status(reason=f"capture failure {fails}/{len(camera_outcomes)}")
 
                     if fails >= CAMERA_FAIL_TRIP:
-                        already_restarted = Path(CAMERA_RESTART_MARKER).exists()
+                        restarted = Path(CAMERA_RESTART_MARKER).exists()
+                        rebooted = Path(CAMERA_REBOOT_MARKER).exists()
                         now_hm = rtc.get_time().strftime('%H:%M')
 
-                        if not already_restarted:
-                            # First time: use our ONE restart. Alert the station, drop the marker,
-                            # and exit(1) so systemd restarts the whole service (re-inits camera).
+                        if not restarted:
+                            # STAGE 1 — service restart. Alert, drop the RESTART marker, exit(1) so
+                            # systemd re-runs main.py (re-inits the camera driver in-process).
                             logger.error(f"Camera failing ({fails}/{len(camera_outcomes)} recent) — "
-                                         f"alerting station and restarting once for a clean recovery.")
+                                         f"STAGE 1: service restart for a clean recovery.")
                             try:
-                                lora.send_message(f"ERROR,Camera failure - restarting device,{now_hm}")
-                                logger.info("📡 Sent camera-failure alert to station.")
+                                lora.send_message(f"ERROR,Camera failure - restarting service,{now_hm}")
+                                logger.info("📡 Sent camera-failure (service restart) alert to station.")
                             except Exception as e:
                                 logger.error(f"Failed to send camera-failure alert: {e}")
                             try:
-                                Path(CAMERA_RESTART_MARKER).touch()  # remember we used our restart
+                                Path(CAMERA_RESTART_MARKER).touch()  # remember stage 1 was used
                             except Exception as e:
                                 logger.error(f"Could not write restart marker: {e}")
                             # Exit with os._exit(), NOT sys.exit(): sys.exit() raises SystemExit which
                             # runs the finally: cleanup block — and that calls camera.stop(), which
-                            # BLOCKS FOREVER on the hung camera (the 2026-08-18 failure: service stuck
-                            # in "Cleaning up..." and systemd never restarted it). os._exit() ends the
-                            # process immediately, skipping all cleanup, so systemd (Restart=on-failure)
-                            # sees exit code 1 and does the clean full restart that re-inits the camera.
-                            logger.error("Exiting now (os._exit) for systemd restart — skipping cleanup "
-                                         "so the hung camera's stop() cannot block the exit.")
+                            # BLOCKS FOREVER on the hung camera (the 2026-08-18 failure). os._exit()
+                            # ends the process immediately, skipping cleanup, so systemd
+                            # (Restart=on-failure) does the clean service restart.
+                            logger.error("Exiting now (os._exit) for systemd service restart — "
+                                         "skipping cleanup so the hung camera's stop() can't block it.")
+                            os._exit(1)
+                        elif not rebooted:
+                            # STAGE 2 — full OS reboot. A service restart didn't fix it (this is the
+                            # known 2026-08 pattern: only a power-cycle helps). A full reboot re-inits
+                            # the ENTIRE kernel/driver/CSI/GPIO stack — the closest software gets to a
+                            # power-cycle. Drop the REBOOT marker FIRST (survives the reboot) so after
+                            # the reboot we escalate to stage 3 instead of rebooting again = NO LOOP.
+                            logger.error("Camera STILL failing after service restart — "
+                                         "STAGE 2: full OS reboot (sudo reboot).")
+                            log_power_status(reason="pre-reboot (stage 2)")
+                            try:
+                                lora.send_message(f"ERROR,Camera failure - rebooting device,{now_hm}")
+                                logger.info("📡 Sent camera-failure (reboot) alert to station.")
+                            except Exception as e:
+                                logger.error(f"Failed to send reboot alert: {e}")
+                            try:
+                                Path(CAMERA_REBOOT_MARKER).touch()  # remember stage 2 was used
+                            except Exception as e:
+                                logger.error(f"Could not write reboot marker: {e}")
+                            try:
+                                import subprocess
+                                subprocess.run(["sudo", "reboot"], timeout=10)
+                            except Exception as e:
+                                logger.error(f"Reboot command failed: {e} — falling through to idle.")
+                            # Give the reboot a moment; if it somehow didn't take, don't spin.
+                            time.sleep(30)
                             os._exit(1)
                         else:
-                            # Camera STILL failing after the restart → hardware needs a manual fix
-                            # (likely the CSI ribbon). Stop trying: alert, then idle so we don't
-                            # thrash in a restart loop. Manual intervention required.
-                            logger.error("Camera STILL failing after a restart — hardware fix needed "
-                                         "(check the camera cable). Not restarting again; idling.")
+                            # STAGE 3 — both a service restart AND a full reboot failed → real hardware
+                            # fix needed (CSI ribbon, connector, or power). Stop escalating: alert and
+                            # idle so we don't reboot-loop. Manual intervention required.
+                            logger.error("Camera STILL failing after service restart AND full reboot — "
+                                         "hardware fix needed (cable/connector/power). Idling.")
                             try:
-                                lora.send_message(f"ERROR,Camera dead after restart - needs manual fix,{now_hm}")
+                                lora.send_message(f"ERROR,Camera dead after restart+reboot - needs manual fix,{now_hm}")
                                 logger.info("📡 Sent 'needs manual fix' alert to station.")
                             except Exception as e:
                                 logger.error(f"Failed to send manual-fix alert: {e}")
@@ -451,24 +674,31 @@ def main():
                     time.sleep(2)
                     continue
 
-                # Successful capture — record the good outcome (windowed), and clear the restart
-                # marker so our "one restart" budget is available again for any FUTURE failure.
+                # Successful capture — record the good outcome (windowed), and clear BOTH recovery
+                # markers so the full escalation budget (service-restart → reboot → give up) is
+                # available again for any FUTURE, independent failure.
                 camera_outcomes.append(True)
-                if Path(CAMERA_RESTART_MARKER).exists():
-                    try:
-                        Path(CAMERA_RESTART_MARKER).unlink()
-                        logger.info("Camera healthy again — cleared restart marker.")
-                    except Exception:
-                        pass
+                for _marker in (CAMERA_RESTART_MARKER, CAMERA_REBOOT_MARKER):
+                    if Path(_marker).exists():
+                        try:
+                            Path(_marker).unlink()
+                            logger.info(f"Camera healthy again — cleared {_marker}.")
+                        except Exception:
+                            pass
 
                 now_dt = rtc.get_time()
                 pos = stepper._offset_label(stepper.current_offset) if stepper else 'C'
                 tile_names = [f'{pos}L', f'{pos}M', f'{pos}R']
                 new_alert = False
                 alerted_this_cycle = set()
+                candidates = {}   # class -> (best first-scan detection, tile_idx, tile_tag, timestamp)
                 scan_save_counter += 1
                 scan_cycle_count += 1
-                should_save_scan = (scan_save_counter % scan_save_every == 0)
+                # Save raw scan images only while inside the post-detection window (see init). The
+                # window is set/extended AFTER a detection below, so this scan (evaluated before any
+                # detection this cycle) reflects a PRIOR detection — i.e. the triggering scan itself
+                # is not saved, only the scans that follow it within the 5-min window.
+                should_save_scan = (time.time() < scan_save_until)
 
                 for tile_idx, frame in enumerate(tiles):
                     # Run detection on this tile
@@ -491,6 +721,11 @@ def main():
                         logger.error(f"Failed to save scan image: {e}")
 
                     if detections:
+                        # A detection (re-)arms the 5-min scan-image save window. Because
+                        # should_save_scan for THIS cycle was already computed above (before this
+                        # detection), the triggering scan isn't saved — saving begins next cycle and
+                        # runs for 5 min, extending on each subsequent detection.
+                        scan_save_until = time.time() + SCAN_SAVE_WINDOW_SECONDS
                         timestamp_str = now_dt.strftime('%Y-%m-%d_%H-%M-%S')
                         tile_tag = tile_names[tile_idx]
                         top = detections[0]
@@ -522,11 +757,24 @@ def main():
                             logger.info(f"🎯 [{tile_tag}] Detected: {detection['class']} "
                                         f"(confidence: {detection['confidence']:.2f})")
 
-                            # Only send alert once per predator class per scan cycle
-                            if detection['class'] not in alerted_this_cycle:
-                                if alert_handler.send_alert(detection, image=None):
-                                    new_alert = True
-                                    alerted_this_cycle.add(detection['class'])
+                            # Don't alert yet — remember the best first-scan hit per class; it is
+                            # verified with a second look after all 3 tiles are checked (below).
+                            c = detection['class']
+                            if c not in candidates or detection['confidence'] > candidates[c][0]['confidence']:
+                                candidates[c] = (detection, tile_idx, tile_tag, timestamp_str)
+
+                # Verify each candidate (rotate toward it, rescan, return), then alert only if the
+                # average of the two scans clears the threshold. Classes still in alert cooldown are
+                # skipped — the alert would be suppressed anyway, so no point moving the turret.
+                for c, (detection, t_idx, t_tag, ts) in candidates.items():
+                    if alert_handler.in_cooldown(c):
+                        continue
+                    confirmed, avg_conf, _ = verify_detection(c, detection['confidence'], t_idx, t_tag, ts)
+                    if confirmed:
+                        alert = dict(detection, confidence=avg_conf)  # alert carries the 2-scan average
+                        if alert_handler.send_alert(alert, image=None, position=t_tag):
+                            new_alert = True
+                            alerted_this_cycle.add(c)
 
                 # NOTE: no immediate heartbeat on new detection anymore. The PREDATOR alert
                 # (sent via alert_handler.send_alert above) is what notifies + updates the
@@ -577,11 +825,59 @@ def main():
                         logger.info(f"🗑️  Monthly cleanup: deleted {deleted} {folder_label} images older than 30 days")
                     last_cleanup_month = today.month
 
-                # Rotate camera to next scan position for the next cycle
+                # Rotate camera to next scan position for the next cycle. Wait 1s FIRST so all of this
+                # position's capture, detection, labeling and image saving is fully settled before the
+                # turret moves — prevents the position label/name from getting tied to the wrong
+                # position when the rotation follows immediately after the capture (2026-09-16 fix).
                 if stepper:
+                    time.sleep(1)
                     stepper.next_position()
+                    rotation_count += 1
+                    # Settle delay AFTER the rotation, before the next cycle captures. next_position()
+                    # is synchronous (returns only when stepping is DONE), but the turret still has
+                    # mechanical inertia and RINGS/wobbles briefly after the motor stops — worst on the
+                    # big L2->R1 swing (3 positions), which builds the most momentum. Without this, the
+                    # next capture fired while R1 was still settling → blurry/off-position R1 frame
+                    # (2026-09-20). 1.5s lets the turret come to rest so every position, including R1
+                    # after the long swing, is captured sharp.
+                    time.sleep(1.5)
 
-                # Wait before next check
+                    # --- Real-motor-stall detection (alert only, never stop) ---------------------
+                    # Check the rail right after EVERY move (a stall's current draw is brief — a
+                    # periodic sample would miss it). undervolt_now == the 5V rail is sagging RIGHT
+                    # NOW, i.e. the just-completed move loaded it → consistent with a stuck motor.
+                    # Small marginal under-rotation on this weak motor draws no extra current and
+                    # won't trip this — exactly as intended (ignore the small stuff).
+                    verbose = (rotation_count % POWER_CHECK_EVERY_ROTATIONS == 0)
+                    undervolt = log_power_status(
+                        reason="post-rotation sample" if verbose else "post-rotation stall-check")
+                    if undervolt:
+                        stall_undervolt_streak += 1
+                        logger.warning(f"⚙️  Undervolt right after a rotation "
+                                       f"({stall_undervolt_streak}/{STALL_ALERT_STREAK}) — possible "
+                                       f"motor stall loading the 5V rail.")
+                        if stall_undervolt_streak >= STALL_ALERT_STREAK and not stall_alerted:
+                            # Confirmed REAL stall (sustained undervolt across several moves). Alert
+                            # the user over radio. Do NOT stop the service — detection keeps running.
+                            stall_alerted = True
+                            hm = rtc.get_time().strftime('%H:%M')
+                            logger.error("🚨 Motor appears STUCK (repeated undervolt on rotation) — "
+                                         "alerting station over LoRa. Detection continues.")
+                            try:
+                                lora.send_message(f"ERROR,Motor stuck - check turret,{hm}")
+                            except Exception as e:
+                                logger.error(f"Failed to send motor-stuck alert: {e}")
+                    else:
+                        # A clean move resets the streak and re-arms the alert for a future stall.
+                        if stall_undervolt_streak or stall_alerted:
+                            logger.info("⚙️  Rotation power back to normal — motor stall cleared.")
+                        stall_undervolt_streak = 0
+                        stall_alerted = False
+
+                # Inter-cycle wait. Set to 0 in config (2026-09-16, "push to the limit" test) so the
+                # cadence is just real work: capture + synchronous inference on all 3 tiles + the 1s
+                # post-capture settle before rotation. Kept as a config knob — raise check_interval
+                # if the Pi runs too hot or you want to slow the scan back down. sleep(0) is a no-op.
                 time.sleep(check_interval)
 
             except KeyboardInterrupt:

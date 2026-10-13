@@ -12,6 +12,7 @@ venv/
 # Runtime state (per-device, not for repo)
 data/.turret_position
 data/.camera_restarting
+data/.camera_rebooted
 data/logs/
 data/detections/
 data/detections_clean/
@@ -30,5 +31,13 @@ PAPER.md
 MODEL_OPTIONS.md
 WEBAPP_PLANNING.md
 
+# Private farm records (personal, not for the repo)
+animal_loss_record.md
+
 # Mac
 .DS_Store
+
+# Per-kit pairing secret + LoRa provisioning state (never commit)
+.kit_key
+data/.prov_*
+data/field_link/

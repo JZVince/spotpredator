@@ -140,7 +140,18 @@ class StepperHandler:
         return order
 
     def _step(self, steps, direction=1):
-        """Drive the motor a number of half-steps. direction: 1=CW, -1=CCW."""
+        """Drive the motor a number of half-steps. direction: 1=CW, -1=CCW.
+
+        Times the move and warns if it takes much longer than expected. The 28BYJ-48 is OPEN-LOOP
+        (no feedback), so a mechanical stall can't be detected from the motor — but the loop itself
+        (steps × step_delay) has a known duration. A big overrun means the Python loop was starved
+        (CPU contention / thermal throttle) OR the move was abnormally slow — worth flagging. NOTE:
+        the ULN2003 is powered from the Pi's 5V, so a STUCK motor pulls locked-rotor current that
+        sags the Pi rail — that shows up as undervolt in main.py's power log, checked right after
+        rotations. Coils are always de-energized at the end, so a stall does not draw current
+        indefinitely once the move returns."""
+        expected_s = steps * self.step_delay
+        t0 = time.perf_counter()
         seq = HALF_STEP_SEQUENCE
         seq_len = len(seq)
         for _ in range(steps):
@@ -148,9 +159,21 @@ class StepperHandler:
                 GPIO.output(self.pins[pin_idx], seq[self._seq_index][pin_idx])
             self._seq_index = (self._seq_index + direction) % seq_len
             time.sleep(self.step_delay)
-        # De-energize coils after moving to prevent overheating and save power
+        # De-energize coils after moving to prevent overheating and save power. IMPORTANT for a stuck
+        # motor: this guarantees the coils stop drawing current the moment the move completes, so a
+        # stall can't keep loading the Pi's 5V rail beyond the move itself.
         for pin in self.pins:
             GPIO.output(pin, GPIO.LOW)
+        elapsed_s = time.perf_counter() - t0
+        # NOTE: this timing does NOT detect a mechanical stall. The 28BYJ-48 is open-loop — _step is
+        # a fixed time.sleep() pulse loop, so a jammed shaft takes the SAME time as free spinning. A
+        # big overrun means the PYTHON LOOP was starved (CPU contention / thermal throttle), not that
+        # the motor stuck. A REAL stall is only detectable via rail sag (locked-rotor current on the
+        # Pi's 5V) — handled in main.py's post-rotation power check, which alerts over radio. So this
+        # is purely a CPU-health signal, logged only.
+        if expected_s > 0 and elapsed_s > expected_s * 1.5:
+            logger.warning(f"⚙️  Stepper move slow: {elapsed_s:.2f}s vs expected {expected_s:.2f}s "
+                           f"({steps} half-steps) — CPU starvation/throttle (NOT a motor stall).")
 
     _seq_index = 0
     _cleaned_up = False
@@ -189,13 +212,75 @@ class StepperHandler:
             return self._offset_label(self.current_offset)
 
     def _offset_label(self, offset):
-        """Human/file-friendly label for a position offset: C, R1, L2, ..."""
+        """Human/file-friendly label for a position offset: C, R1, L2, ...
+
+        Sign→side mapping (2026-09-13): the motor's POSITIVE offset direction physically rotates the
+        camera to the LEFT of the scene, so positive→L and negative→R. This was confirmed by
+        comparing saved image names to where the animal actually was. Only the LABEL is derived here;
+        the motor stepping, visit order and homing are unchanged (they work in raw signed offsets)."""
         if offset == 0:
             return "C"
-        return f"R{offset}" if offset > 0 else f"L{-offset}"
+        return f"L{offset}" if offset > 0 else f"R{-offset}"
+
+    # --- Verification nudge (false-positive check, 2026-10-11) -------------------------------
+    # A small temporary rotation off the current scan position for a second look at a detection.
+    # It does NOT change current_offset (the scan routine never knows it happened). The signed
+    # step count is written to a file BEFORE moving and deleted only after returning, so if the
+    # device crashes mid-nudge, home() at the next startup undoes it before anything else.
+    _NUDGE_FILE = 'data/.turret_nudge'
+
+    def max_angle(self):
+        """Furthest the scan routine itself goes from center (degrees) — the cable's normal range."""
+        return self.steps_each_side * self.degrees_per_step
+
+    def nudge(self, degrees, edge_allowance=5):
+        """Rotate by a signed angle (+ = same direction as positive offsets) and remember it.
+        At the edge positions (L2/R2) a nudge OUTWARD would twist the cable past its normal range,
+        so it is shortened to at most `edge_allowance` degrees past that range (default 5°).
+        Returns the degrees actually moved (0 if not possible)."""
+        if not self.gpio_available or degrees == 0:
+            return 0
+        here = self.current_offset * self.degrees_per_step
+        limit = self.max_angle() + edge_allowance
+        if abs(here + degrees) > limit:
+            room = limit - abs(here)            # degrees left before the allowed limit, outward
+            shortened = room if degrees > 0 else -room
+            if room <= 0:
+                logger.info(f"📐 Nudge {degrees:+}° skipped — already at the cable limit")
+                return 0
+            logger.info(f"📐 Nudge {degrees:+}° shortened to {shortened:+.0f}° at the edge position")
+            degrees = shortened
+        steps = int(round(abs(degrees) / 360.0 * self.steps_per_rev))
+        signed = steps if degrees > 0 else -steps
+        try:
+            with open(self._NUDGE_FILE, 'w') as f:
+                f.write(str(signed))
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Could not record nudge, skipping it: {e}")
+            return 0
+        self._step(steps, direction=1 if signed > 0 else -1)
+        return degrees
+
+    def unnudge(self):
+        """Undo a pending nudge (from this run or a crashed one) and clear the record."""
+        try:
+            with open(self._NUDGE_FILE) as f:
+                signed = int(f.read().strip())
+        except (FileNotFoundError, ValueError):
+            return
+        if self.gpio_available and signed:
+            self._step(abs(signed), direction=-1 if signed > 0 else 1)
+        try:
+            os.remove(self._NUDGE_FILE)
+        except FileNotFoundError:
+            pass
 
     def home(self):
         """Return to center, unwinding by the exact offset currently held."""
+        # Undo any verification nudge left behind by a crash first, so the offset math is right.
+        if os.path.exists(self._NUDGE_FILE):
+            logger.info("📐 Undoing a leftover verification nudge before homing")
+            self.unnudge()
         if not self.gpio_available or self.current_offset == 0:
             return
         try:

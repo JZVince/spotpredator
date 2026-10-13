@@ -9,6 +9,7 @@ import sys
 import threading
 import smtplib
 import subprocess
+import json
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from datetime import datetime, date
@@ -34,6 +35,9 @@ except ImportError:
 
 from PIL import Image, ImageDraw
 
+# Encrypted WiFi provisioning for the field device over LoRa
+from field_link import FieldLink
+
 # Buzzer (optional)
 try:
     import RPi.GPIO as GPIO
@@ -57,6 +61,13 @@ os.makedirs('data/logs', exist_ok=True)
 # Flag file written by scripts/daily_report.pl when all its email send attempts fail; the OLED
 # shows "Email Report Failure" while it exists, and the Perl script removes it on a successful send.
 EMAIL_FAIL_FLAG = 'data/logs/.email_report_failed'
+
+# Predator-alert emails that could not be sent (no internet) are queued here, one JSON alert per
+# line, and re-sent automatically once the internet is back (2026-09-25: a ~4h router outage
+# silently dropped 7 alert emails — the old code tried once + one WiFi reconnect, then gave up).
+PENDING_ALERTS_FILE = 'data/logs/.pending_alert_emails.jsonl'
+PENDING_RETRY_SECONDS = 120   # how often to check whether queued alerts can be sent
+SMTP_TIMEOUT = 30             # seconds; without it a half-dead network can hang smtplib forever
 
 logging.basicConfig(
     level=logging.INFO,
@@ -106,6 +117,10 @@ class DisplayStation:
         except Exception as e:
             logger.error(f"Failed to initialize LoRa: {e}")
             raise
+        self._rx_buf = ""  # unfinished LoRa line carried to the next read
+        # Sends the field device its WiFi details over LoRa (encrypted with the kit key). Uses this
+        # same serial port, so there's never a second process fighting over it.
+        self.field_link = FieldLink(self.lora)
 
         # Initialize OLED display
         try:
@@ -142,6 +157,7 @@ class DisplayStation:
         # This makes the age update smoothly between the field's 30-min heartbeats, and lets the
         # display self-expire instead of showing a frozen "1min ago" forever.
         self.recent_predator = None       # e.g. "coyote_74"  (type_conf)
+        self.recent_predator_position = ''  # turret position when detected (C/L1/L2/R1/R2)
         self.recent_predator_time = None  # our time.time() when we learned of it
         self.PREDATOR_TTL = 600           # seconds to keep showing the predator (10 min)
 
@@ -150,7 +166,7 @@ class DisplayStation:
         # is more urgent). We show the error for ERROR_TTL, and it overrides the predator line.
         self.recent_error = None          # error description text
         self.recent_error_time = None     # our time.time() when the error arrived
-        self.ERROR_TTL = 1800             # keep showing the error for 30 min
+        self.ERROR_TTL = 3600             # keep showing the error for 1 hour, then let heartbeats show again
 
         # Email and WiFi settings - loaded from .env file
         self.email_address = os.getenv("EMAIL_ADDRESS", "")
@@ -159,7 +175,22 @@ class DisplayStation:
         self.last_email_date = None
         self.last_log_cleanup_month = None
         self.last_keepalive_time = 0
+        self._pending_lock = threading.Lock()   # guards PENDING_ALERTS_FILE
+        self._flush_running = False
+        self._last_pending_check = 0
         self.summary_stats = {}  # Stores SUMMARY1/2/3 from field Pi
+        self.report_sent_date = None  # date (YYYY-MM-DD) we last fired the daily report (SUMMARY_END latch)
+
+        # Clear a stale email-report-failure flag on startup (2026-09-20). The flag is a file, so it
+        # survives reboots — a failure from a previous session would otherwise keep showing "(email
+        # fail)" on the display forever, even after the underlying WiFi issue is fixed and the device
+        # rebooted. A fresh boot = fresh state; a real failure will re-create the flag when it happens.
+        try:
+            if os.path.exists(EMAIL_FAIL_FLAG):
+                os.remove(EMAIL_FAIL_FLAG)
+                logger.info("Cleared stale email-report-failure flag on startup.")
+        except Exception as e:  # noqa: BLE001
+            logger.warning(f"Could not clear email-fail flag on startup: {e}")
         if self.email_address and self.email_password:
             logger.info("✅ Email configured")
         else:
@@ -194,15 +225,25 @@ class DisplayStation:
         # lower-priority one that happens to be within its window. Expired tiers self-clear.
         now = time.time()
 
-        # Tier 3 (lowest): routine heartbeat / normal status.
-        status = self.last_heartbeat_status or "Waiting..."
+        # Tier 3 (base): routine heartbeat / normal status. If the daily-report email failed, append
+        # a short "(email fail)" note to the heartbeat INSTEAD of replacing the whole line — so the
+        # "field is alive" heartbeat STAYS VISIBLE (2026-09-20 fix). Previously "! Email Report
+        # Failure" overrode everything with no timeout, hiding the 30-min heartbeats entirely, so the
+        # user couldn't tell the field device was still working. The email-fail flag is informational,
+        # not urgent — it must never hide the heartbeat.
+        base = self.last_heartbeat_status or "Waiting..."
+        if os.path.exists(EMAIL_FAIL_FLAG):
+            base = f"{base} (email fail)"
+        status = base
 
         # Tier 2: predator "seen N min ago" (overrides heartbeat; NOT cleared by routine heartbeats).
         if self.recent_predator and self.recent_predator_time:
             if (now - self.recent_predator_time) < self.PREDATOR_TTL:
                 ptype, pconf = self.recent_predator.split('_')
                 mins = int((now - self.recent_predator_time) / 60)
-                status = f"{ptype} {pconf}% seen {mins}min ago"
+                ppos = getattr(self, 'recent_predator_position', '')
+                pos_str = f" @{ppos}" if ppos else ""
+                status = f"{ptype} {pconf}%{pos_str} seen {mins}min ago"
             else:
                 self.recent_predator = None  # expired
                 self.recent_predator_time = None
@@ -216,9 +257,8 @@ class DisplayStation:
                 self.recent_error = None  # expired
                 self.recent_error_time = None
 
-        # Special case above all: daily-report email failure flag (from the Perl report script).
-        if os.path.exists(EMAIL_FAIL_FLAG):
-            status = "! Email Report Failure"
+        # (Email-report-failure is now folded into the base heartbeat line above as "(email fail)",
+        # so it no longer hides the heartbeat or the error/predator tiers.)
         words = status.split()
         lines = []
         current = ""
@@ -300,13 +340,27 @@ class DisplayStation:
                         'time': parts[2]
                     }
 
-            # Format: PREDATOR,<type>,<time>,<confidence>,<date>
+            # Format: PREDATOR,<type>,<time>,<position>,<confidence>,<date>
+            # (position = C/L1/L2/R1/R2 — turret position when detected). Older field devices sent
+            # PREDATOR,<type>,<time>,<confidence>,<date> (no position); detect that by field count so
+            # a not-yet-updated field unit still parses correctly.
             if message.startswith("PREDATOR,"):
                 parts = message.split(',')
-                if len(parts) >= 4:
+                if len(parts) >= 6:
+                    # New format with position at parts[3]
                     return {
                         'type': parts[1],
                         'time': parts[2],
+                        'position': parts[3],
+                        'confidence': parts[4],
+                        'date': parts[5] if len(parts) > 5 else ''
+                    }
+                elif len(parts) >= 4:
+                    # Legacy format (no position)
+                    return {
+                        'type': parts[1],
+                        'time': parts[2],
+                        'position': '',
                         'confidence': parts[3],
                         'date': parts[4] if len(parts) > 4 else ''
                     }
@@ -330,82 +384,134 @@ class DisplayStation:
         return None
 
     def check_for_message(self):
-        """Check for incoming LoRa messages"""
+        """Read everything the LoRa module has sent and handle each received message.
+
+        The old version only looked at the FIRST line of a read, so two messages arriving together
+        (or an "+OK" from our own send followed by a message) lost the second one. Field WiFi
+        acknowledgements ("PACK") go to the field link; everything else to the alert handling."""
+        handled = False
         try:
             if self.lora.in_waiting > 0:
-                data = self.lora.read(self.lora.in_waiting).decode().strip()
+                self._rx_buf += self.lora.read(self.lora.in_waiting).decode(errors="replace")
+            *lines, self._rx_buf = self._rx_buf.replace("\r", "").split("\n")
+            if not self._rx_buf.startswith("+RCV") and not "+RCV=".startswith(self._rx_buf):
+                self._rx_buf = ""  # stray response fragment, not a message
+            for line in lines:
+                line = line.strip()
+                if not line.startswith("+RCV="):
+                    continue
+                try:  # +RCV=<addr>,<len>,<data>,<rssi>,<snr> — cut <data> by its length
+                    _addr, _len, _rest = line[5:].split(",", 2)
+                    payload = _rest[:int(_len)]
+                except ValueError:
+                    payload = ""
+                if self.field_link.handle(payload):
+                    handled = True
+                    continue
+                handled = self._handle_rcv(line) or handled
+        except Exception as e:
+            logger.error(f"Error checking message: {e}")
+        return handled
 
-                # Parse message: +RCV=<address>,<length>,<message>,<RSSI>,<SNR>
-                if data.startswith("+RCV="):
-                    parts = data[5:].split(',', 2)  # Get first 3 parts
+    def _handle_rcv(self, data):
+        """Handle one +RCV line (alerts, heartbeats, summaries, errors)."""
+        try:
+            # Parse message: +RCV=<address>,<length>,<message>,<RSSI>,<SNR>
+            if data.startswith("+RCV="):
+                parts = data[5:].split(',', 2)  # Get first 3 parts
 
-                    if len(parts) >= 3:
-                        # Strip trailing RSSI and SNR (last two comma-separated values)
-                        raw_message = parts[2]
-                        msg_parts = raw_message.rsplit(',', 2)
-                        message = msg_parts[0] if len(msg_parts) == 3 else raw_message
+                if len(parts) >= 3:
+                    # Strip trailing RSSI and SNR (last two comma-separated values)
+                    raw_message = parts[2]
+                    msg_parts = raw_message.rsplit(',', 2)
+                    message = msg_parts[0] if len(msg_parts) == 3 else raw_message
 
-                        # Parse alert
-                        alert = self.parse_alert_message(message)
+                    # Parse alert
+                    alert = self.parse_alert_message(message)
 
-                        if alert:
-                            if alert['type'] == 'heartbeat':
-                                self.last_heartbeat_status = alert['status']
-                                self.last_heartbeat_time = alert['time']
-                                self.alert_active = False  # Stop flashing on heartbeat
-                                self.last_alert = None
-                                # NOTE: heartbeats no longer carry predator timing. A heartbeat
-                                # does NOT interrupt an in-progress predator countdown (see
-                                # show_waiting) — only a new PREDATOR message or the 10-min
-                                # expiry clears it.
-                                logger.info(f"💓 Heartbeat: {alert['status']} at {alert['time']}")
-                                detection_logger.info(f"HEARTBEAT | {alert['status']} | {alert['time']}")
-                                field_logger.info(f"HEARTBEAT | {alert['status']} | {alert['time']}")
-                            elif alert['type'] in ('SUMMARY1', 'SUMMARY2', 'SUMMARY3'):
-                                if alert['type'] == 'SUMMARY3' and alert['type'] in self.summary_stats:
-                                    # Append chunks for SUMMARY3
-                                    self.summary_stats['SUMMARY3'] += ' ' + alert['data']
-                                else:
-                                    self.summary_stats[alert['type']] = alert['data']
-                                logger.info(f"📊 {alert['type']} received: {alert['data']}")
-                                field_logger.info(f"{alert['type']} | {alert['data']}")
-                            elif alert['type'] == 'error':
-                                # Field device reported a fault (e.g. camera failure). Highest
-                                # display priority — record it with its own timestamp so it
-                                # OVERRIDES the predator countdown (see show_waiting). Buzz + email.
-                                desc = alert['description']
-                                self.recent_error = desc
-                                self.recent_error_time = time.time()
-                                self.last_heartbeat_time = alert['time']
-                                self.alert_active = False
-                                logger.error(f"⚠️ FIELD DEVICE ERROR: {desc} at {alert['time']}")
-                                detection_logger.info(f"ERROR | {desc} | {alert['time']}")
-                                field_logger.info(f"ERROR | {desc} | {alert['time']}")
-                                self.beep(count=3, duration=0.2)
-                                # Non-blocking: email in a background thread so a slow/hung SMTP
-                                # send can't freeze the display loop.
-                                self._email_async(self.send_error_email, desc, alert['time'])
+                    if alert:
+                        if alert['type'] == 'heartbeat':
+                            self.last_heartbeat_status = alert['status']
+                            self.last_heartbeat_time = alert['time']
+                            self.alert_active = False  # Stop flashing on heartbeat
+                            self.last_alert = None
+                            # NOTE: heartbeats no longer carry predator timing. A heartbeat
+                            # does NOT interrupt an in-progress predator countdown (see
+                            # show_waiting) — only a new PREDATOR message or the 10-min
+                            # expiry clears it.
+                            logger.info(f"💓 Heartbeat: {alert['status']} at {alert['time']}")
+                            detection_logger.info(f"HEARTBEAT | {alert['status']} | {alert['time']}")
+                            field_logger.info(f"HEARTBEAT | {alert['status']} | {alert['time']}")
+                        elif alert['type'] in ('SUMMARY1', 'SUMMARY2', 'SUMMARY3'):
+                            if alert['type'] == 'SUMMARY3' and alert['type'] in self.summary_stats:
+                                # Append chunks for SUMMARY3
+                                self.summary_stats['SUMMARY3'] += ' ' + alert['data']
                             else:
-                                self.last_alert = alert
-                                self.alert_time = time.time()
-                                self.alert_active = True  # Start flashing
-                                self.blink_state = False
-                                # Record this predator + OUR receive time so show_waiting can age
-                                # it live ("<type> <conf>% seen N min ago") for 10 min, then revert.
-                                # A NEW detection resets the clock; heartbeats do NOT interrupt it.
-                                try:
-                                    conf_pct = int(float(alert['confidence']) * 100)
-                                except (ValueError, TypeError):
-                                    conf_pct = alert['confidence']
-                                self.recent_predator = f"{alert['type']}_{conf_pct}"
-                                self.recent_predator_time = time.time()
-                                detection_logger.info(f"PREDATOR | {alert['type']} | confidence={alert['confidence']} | {alert.get('time','')} | {alert.get('date','')}")
-                                field_logger.info(f"PREDATOR | {alert['type']} | confidence={alert['confidence']} | {alert.get('time','')} | {alert.get('date','')}")
-                                self.beep(count=1, duration=0.15)
-                                # Non-blocking: email in a background thread (see _email_async) so
-                                # a slow SMTP send on flaky WiFi can't freeze the OLED refresh.
-                                self._email_async(self.send_alert_email, alert)
-                            return True
+                                self.summary_stats[alert['type']] = alert['data']
+                            logger.info(f"📊 {alert['type']} received: {alert['data']}")
+                            field_logger.info(f"{alert['type']} | {alert['data']}")
+                        elif alert['type'] == 'SUMMARY_END':
+                            # The field has finished sending the full daily summary. Fire the
+                            # email report NOW — event-driven so it follows whatever end_hour the
+                            # user set (2026-09-18), instead of a fixed cron time. Guard against
+                            # duplicates (a re-sent marker) with a per-day latch. Run in a daemon
+                            # thread so the (up-to-1-hour retry) report never blocks the display.
+                            field_logger.info("SUMMARY_END | daily summary complete")
+                            today_str = date.today().strftime("%Y-%m-%d")
+                            if self.report_sent_date != today_str:
+                                self.report_sent_date = today_str
+                                logger.info("📊 Full summary received — triggering daily report.")
+                                self._run_daily_report_async()
+                            else:
+                                logger.info("📊 SUMMARY_END again today — report already triggered, skipping.")
+                        elif alert['type'] == 'error':
+                            # Field device reported a fault (e.g. camera failure). Highest
+                            # display priority — record it with its own timestamp so it
+                            # OVERRIDES the predator countdown (see show_waiting). Buzz + email.
+                            desc = alert['description']
+                            self.recent_error = desc
+                            self.recent_error_time = time.time()
+                            self.last_heartbeat_time = alert['time']
+                            self.alert_active = False
+                            logger.error(f"⚠️ FIELD DEVICE ERROR: {desc} at {alert['time']}")
+                            detection_logger.info(f"ERROR | {desc} | {alert['time']}")
+                            field_logger.info(f"ERROR | {desc} | {alert['time']}")
+                            self.beep(count=3, duration=0.2)
+                            # Non-blocking: email in a background thread so a slow/hung SMTP
+                            # send can't freeze the display loop.
+                            self._email_async(self.send_error_email, desc, alert['time'])
+                        elif str(alert['type']).startswith('SUMMARY') or 'confidence' not in alert:
+                            # Any other SUMMARY-type message (e.g. "SUMMARY,No scan data for
+                            # today") or anything without a confidence is NOT a predator alert.
+                            # It used to fall through to the predator branch below, which set
+                            # last_alert and then crashed on alert['confidence'] — the main loop
+                            # then crashed again in show_alert, killing the service. That was the
+                            # nightly 21:16 "reboot" (really 2 service restarts), 2026-09-29.
+                            logger.info(f"ℹ️ Non-predator message logged: {alert}")
+                            field_logger.info(f"{alert['type']} | {alert.get('data', alert)}")
+                        else:
+                            self.last_alert = alert
+                            self.alert_time = time.time()
+                            self.alert_active = True  # Start flashing
+                            self.blink_state = False
+                            # Record this predator + OUR receive time so show_waiting can age
+                            # it live ("<type> <conf>% seen N min ago") for 10 min, then revert.
+                            # A NEW detection resets the clock; heartbeats do NOT interrupt it.
+                            try:
+                                conf_pct = int(float(alert['confidence']) * 100)
+                            except (ValueError, TypeError):
+                                conf_pct = alert['confidence']
+                            self.recent_predator = f"{alert['type']}_{conf_pct}"
+                            self.recent_predator_position = alert.get('position', '')
+                            self.recent_predator_time = time.time()
+                            _pos = alert.get('position', '')
+                            detection_logger.info(f"PREDATOR | {alert['type']} | pos={_pos} | confidence={alert['confidence']} | {alert.get('time','')} | {alert.get('date','')}")
+                            field_logger.info(f"PREDATOR | {alert['type']} | pos={_pos} | confidence={alert['confidence']} | {alert.get('time','')} | {alert.get('date','')}")
+                            self.beep(count=1, duration=0.15)
+                            # Non-blocking: email in a background thread (see _email_async) so
+                            # a slow SMTP send on flaky WiFi can't freeze the OLED refresh.
+                            self._email_async(self.send_alert_email, alert)
+                        return True
 
         except Exception as e:
             logger.error(f"Error checking message: {e}")
@@ -459,46 +565,149 @@ class DisplayStation:
         the email either goes out in the background or logs a failure — the display keeps running."""
         threading.Thread(target=fn, args=args, daemon=True).start()
 
+    def _run_daily_report_async(self):
+        """Launch the Perl daily report (scripts/daily_report.pl) in a daemon thread. Triggered by
+        the SUMMARY_END LoRa marker so the report fires right after the field's end-of-day summary
+        arrives — event-driven, follows the user's end_hour. The Perl script builds + emails the
+        report and retries on failure (every 10 min for up to 1 hr), which is why this MUST run in a
+        background thread — otherwise its retry loop would freeze the display for up to an hour."""
+        def _run():
+            try:
+                subprocess.run(
+                    ["perl", "/home/pi/spotpredator/scripts/daily_report.pl"],
+                    cwd="/home/pi/spotpredator",
+                    capture_output=True, text=True, timeout=4000,  # >1hr to allow the full retry window
+                )
+                logger.info("📧 Daily report script finished.")
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Failed to run daily report script: {e}")
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _build_alert_msg(self, alert, delayed=False):
+        """Build the predator-alert email. delayed=True marks one that sat in the offline queue."""
+        predator_type = alert['type']
+        confidence = int(float(alert['confidence']) * 100)
+        alert_time = alert.get('time', '')
+        alert_date = alert.get('date', '')
+        position = alert.get('position', '')
+
+        prefix = "(Delayed) " if delayed else ""
+        subject = f"🚨 {prefix}SpotPredator Alert - {predator_type.upper()} detected!"
+        body = f"Predator detected at your farm!\n\n"
+        if delayed:
+            body += ("NOTE: this alert was detected while the station had no internet and is being "
+                     "sent late. Check the Time/Date below for when it actually happened.\n\n")
+        body += f"Type: {predator_type.upper()}\n"
+        body += f"Confidence: {confidence}%\n"
+        if position:
+            body += f"Location: {position}\n"
+        body += f"Time: {alert_time}\n"
+        body += f"Date: {alert_date}\n"
+        # Explain the location code so it's actionable (turret position + frame third).
+        if position:
+            body += ("\nLocation key: turret position (C=center, L1/L2=left, R1/R2=right) "
+                     "+ frame third (L=left, M=middle, R=right). "
+                     "e.g. R2L = right-2 position, left side of view.\n")
+        body += f"\nCheck your field immediately!"
+
+        msg = MIMEMultipart()
+        msg['From'] = self.email_address
+        msg['To'] = self.email_address
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain', 'utf-8'))
+        return msg
+
+    def _smtp_send(self, msg):
+        with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=SMTP_TIMEOUT) as server:
+            server.login(self.email_address, self.email_password)
+            server.send_message(msg)
+
     def send_alert_email(self, alert):
-        """Send immediate email on predator detection"""
+        """Send immediate email on predator detection. If it can't be sent (no internet), the alert
+        is QUEUED to PENDING_ALERTS_FILE and re-sent later by _flush_pending_alerts — never dropped."""
         if not self.email_address or not self.email_password:
             return
         try:
-            predator_type = alert['type']
-            confidence = int(float(alert['confidence']) * 100)
-            alert_time = alert.get('time', '')
-            alert_date = alert.get('date', '')
-
-            subject = f"🚨 SpotPredator Alert - {predator_type.upper()} detected!"
-            body = f"Predator detected at your farm!\n\n"
-            body += f"Type: {predator_type.upper()}\n"
-            body += f"Confidence: {confidence}%\n"
-            body += f"Time: {alert_time}\n"
-            body += f"Date: {alert_date}\n"
-            body += f"\nCheck your field immediately!"
-
-            msg = MIMEMultipart()
-            msg['From'] = self.email_address
-            msg['To'] = self.email_address
-            msg['Subject'] = subject
-            msg.attach(MIMEText(body, 'plain', 'utf-8'))
-
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-                server.login(self.email_address, self.email_password)
-                server.send_message(msg)
-
-            logger.info(f"📧 Alert email sent: {predator_type} at {alert_time}")
-
+            self._smtp_send(self._build_alert_msg(alert))
+            logger.info(f"📧 Alert email sent: {alert['type']} at {alert.get('time', '')}")
+            return
         except Exception as e:
             logger.error(f"Failed to send alert email: {e}")
-            if self.reconnect_wifi():
-                try:
-                    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-                        server.login(self.email_address, self.email_password)
-                        server.send_message(msg)
-                    logger.info(f"📧 Alert email sent after WiFi reconnect")
-                except Exception as e2:
-                    logger.error(f"Alert email failed after reconnect: {e2}")
+        if self.reconnect_wifi():
+            try:
+                self._smtp_send(self._build_alert_msg(alert))
+                logger.info("📧 Alert email sent after WiFi reconnect")
+                return
+            except Exception as e2:
+                logger.error(f"Alert email failed after reconnect: {e2}")
+        self._queue_alert(alert)
+
+    def _queue_alert(self, alert):
+        """Append an unsent alert to the offline queue (one JSON object per line)."""
+        try:
+            with self._pending_lock:
+                with open(PENDING_ALERTS_FILE, 'a') as f:
+                    f.write(json.dumps(alert) + "\n")
+            logger.warning(f"📥 Alert email queued for later: {alert['type']} at {alert.get('time', '')}")
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Could not queue alert email (it will be lost): {e}")
+
+    def _build_digest_msg(self, alerts):
+        """ONE email summarising every alert detected while the station was offline — so an outage
+        produces a single catch-up email, not a burst of one-per-alert (user preference 2026-09-25)."""
+        n = len(alerts)
+        subject = f"🚨 SpotPredator - {n} predator alert{'s' if n != 1 else ''} missed while offline"
+        lines = ["The station had no internet, so these alerts could not be emailed when they happened.",
+                 "They were still shown on the display and logged.", ""]
+        for a in alerts:
+            try:
+                conf = f"{int(float(a['confidence']) * 100)}%"
+            except (ValueError, TypeError, KeyError):
+                conf = str(a.get('confidence', '?'))
+            loc = f"  Location: {a['position']}" if a.get('position') else ""
+            lines.append(f"  {a.get('date', '')} {a.get('time', '')} - {a.get('type', '?').upper()} ({conf}){loc}")
+        lines += ["", "Location key: turret position (C=center, L1/L2=left, R1/R2=right) "
+                  "+ frame third (L=left, M=middle, R=right)."]
+        msg = MIMEMultipart()
+        msg['From'] = self.email_address
+        msg['To'] = self.email_address
+        msg['Subject'] = subject
+        msg.attach(MIMEText("\n".join(lines), 'plain', 'utf-8'))
+        return msg
+
+    def _flush_pending_alerts(self):
+        """When the internet is back, send ALL queued alerts as ONE digest email, then clear the queue.
+        Runs in a daemon thread; only one flush at a time. If the send fails, the queue is kept."""
+        try:
+            if not self.has_internet():
+                return
+            with self._pending_lock:
+                if not os.path.exists(PENDING_ALERTS_FILE):
+                    return
+                with open(PENDING_ALERTS_FILE) as f:
+                    pending = [json.loads(l) for l in f if l.strip()]
+            if not pending:
+                return
+            try:
+                self._smtp_send(self._build_digest_msg(pending))
+                logger.info(f"📧 Sent 1 catch-up email covering {len(pending)} missed alert(s)")
+            except Exception as e:  # noqa: BLE001
+                logger.error(f"Catch-up email failed, keeping {len(pending)} alert(s) queued: {e}")
+                return
+            with self._pending_lock:
+                # Keep anything queued while we were sending (appended after our snapshot).
+                with open(PENDING_ALERTS_FILE) as f:
+                    now_lines = [json.loads(l) for l in f if l.strip()]
+                newer = now_lines[len(pending):]
+                if newer:
+                    with open(PENDING_ALERTS_FILE, 'w') as f:
+                        f.writelines(json.dumps(a) + "\n" for a in newer)
+                else:
+                    os.remove(PENDING_ALERTS_FILE)
+        except Exception as e:  # noqa: BLE001
+            logger.error(f"Error flushing queued alert emails: {e}")
+        finally:
+            self._flush_running = False
 
     def send_error_email(self, description, err_time):
         """Email the user when the field device reports a fault (e.g. camera failure)."""
@@ -515,7 +724,7 @@ class DisplayStation:
         msg['Subject'] = subject
         msg.attach(MIMEText(body, 'plain', 'utf-8'))
         try:
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=SMTP_TIMEOUT) as server:
                 server.login(self.email_address, self.email_password)
                 server.send_message(msg)
             logger.info(f"📧 Error email sent: {description}")
@@ -523,7 +732,7 @@ class DisplayStation:
             logger.error(f"Failed to send error email: {e}")
             if self.reconnect_wifi():
                 try:
-                    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                    with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=SMTP_TIMEOUT) as server:
                         server.login(self.email_address, self.email_password)
                         server.send_message(msg)
                     logger.info("📧 Error email sent after WiFi reconnect")
@@ -589,7 +798,7 @@ class DisplayStation:
             msg['Subject'] = f"SpotPredator Daily Report - {today} - {len(predator_alerts)} alerts"
             msg.attach(MIMEText(body, 'plain', 'utf-8'))
 
-            with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+            with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=SMTP_TIMEOUT) as server:
                 server.login(self.email_address, self.email_password)
                 server.send_message(msg)
 
@@ -601,7 +810,7 @@ class DisplayStation:
             logger.error(f"Failed to send daily email: {e}")
             if self.reconnect_wifi():
                 try:
-                    with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
+                    with smtplib.SMTP_SSL('smtp.gmail.com', 465, timeout=SMTP_TIMEOUT) as server:
                         server.login(self.email_address, self.email_password)
                         server.send_message(msg)
                     logger.info(f"📧 Daily email sent after WiFi reconnect")
@@ -616,42 +825,60 @@ class DisplayStation:
 
         try:
             while True:
-                # Check for messages
-                self.check_for_message()
+                # One bad iteration must NOT kill the service. Previously only Ctrl+C was caught, so any
+                # error here (e.g. an OLED I2C glitch in show_waiting/show_alert -> OSError) crashed the
+                # process; systemd then restarted it and the screen dropped back to "Waiting..." — which
+                # looked like a reboot (2026-09-29). Now we log the full traceback and keep running.
+                try:
+                    # Check for messages
+                    self.check_for_message()
+                    # Send / resend a queued WiFi-for-the-field-device request, if any
+                    self.field_link.tick()
 
-                # Handle display
-                # Flash the alert briefly (~10s) on a fresh detection, then fall through to
-                # show_waiting(), which renders the live "seen N min ago" countdown for 10 min.
-                if self.alert_active and self.last_alert and (time.time() - (self.alert_time or 0)) < 10:
-                    self.show_alert(
-                        self.last_alert['type'],
-                        self.last_alert['confidence'],
-                        self.last_alert['time'],
-                        self.last_alert.get('date', ''),
-                        fill_bg=self.blink_state
-                    )
-                    self.blink_state = not self.blink_state
-                else:
-                    self.alert_active = False  # flashing burst done; aging takes over
-                    self.show_waiting()
+                    # Handle display
+                    # Flash the alert briefly (~10s) on a fresh detection, then fall through to
+                    # show_waiting(), which renders the live "seen N min ago" countdown for 10 min.
+                    if self.alert_active and self.last_alert and (time.time() - (self.alert_time or 0)) < 10:
+                        self.show_alert(
+                            self.last_alert['type'],
+                            self.last_alert['confidence'],
+                            self.last_alert['time'],
+                            self.last_alert.get('date', ''),
+                            fill_bg=self.blink_state
+                        )
+                        self.blink_state = not self.blink_state
+                    else:
+                        self.alert_active = False  # flashing burst done; aging takes over
+                        self.show_waiting()
 
-                now = datetime.now()
+                    now = datetime.now()
 
-                # WiFi keepalive ping every 10 minutes
-                if time.time() - self.last_keepalive_time >= 600:
-                    subprocess.run(['ping', '-c', '1', '-W', '3', '8.8.8.8'], capture_output=True)
-                    self.last_keepalive_time = time.time()
+                    # WiFi keepalive ping every 10 minutes
+                    if time.time() - self.last_keepalive_time >= 600:
+                        subprocess.run(['ping', '-c', '1', '-W', '3', '8.8.8.8'], capture_output=True)
+                        self.last_keepalive_time = time.time()
 
-                # Monthly log cleanup: 1st of month at midnight
-                today = date.today()
-                if today.day == 1 and now.hour == 0 and now.minute == 0 and self.last_log_cleanup_month != today.month:
-                    for log_file in ['data/logs/display_station.log', 'data/logs/display_detections.log', 'data/logs/wifi_reconnect.log']:
-                        if os.path.exists(log_file):
-                            with open(log_file, 'w'):
-                                pass
-                    logger.info("🗑️  Monthly log cleanup: logs cleared")
-                    self.last_log_cleanup_month = today.month
+                    # Re-send any alert emails queued during an internet outage (checked every 2 min,
+                    # in a background thread so the ping/SMTP can't stall the display loop).
+                    if (time.time() - self._last_pending_check >= PENDING_RETRY_SECONDS
+                            and not self._flush_running and os.path.exists(PENDING_ALERTS_FILE)):
+                        self._last_pending_check = time.time()
+                        self._flush_running = True
+                        threading.Thread(target=self._flush_pending_alerts, daemon=True).start()
 
+                    # Monthly log cleanup: 1st of month at midnight
+                    today = date.today()
+                    if today.day == 1 and now.hour == 0 and now.minute == 0 and self.last_log_cleanup_month != today.month:
+                        for log_file in ['data/logs/display_station.log', 'data/logs/display_detections.log', 'data/logs/wifi_reconnect.log']:
+                            if os.path.exists(log_file):
+                                with open(log_file, 'w'):
+                                    pass
+                        logger.info("🗑️  Monthly log cleanup: logs cleared")
+                        self.last_log_cleanup_month = today.month
+
+                except Exception:  # noqa: BLE001
+                    logger.exception("Main loop error — continuing (see traceback)")
+                    time.sleep(1)
                 time.sleep(0.5)  # Check twice per second
 
         except KeyboardInterrupt:

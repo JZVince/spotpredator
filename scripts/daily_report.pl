@@ -12,6 +12,27 @@ my $log_file  = "/home/pi/spotpredator/data/logs/field_messages.log";
 my $env_file  = "/home/pi/spotpredator/display_station/.env";
 my $today     = get_today();
 
+# "Report already sent today" marker — written on a successful send, holding the date. Lets the
+# EVENT trigger (SUMMARY_END from the field) and the CRON FALLBACK coexist without double-sending.
+my $sent_marker = "/home/pi/spotpredator/data/logs/.report_sent_date";
+
+# --fallback: run from the late cron. It should ONLY send if today's report has NOT already gone out
+# via the event trigger (SUMMARY_END). If it already sent today, exit quietly. This covers a dropped
+# SUMMARY_END LoRa packet — the report still goes out (with whatever data was logged), while a normal
+# night where the event fired sends exactly one email.
+my $is_fallback = (grep { $_ eq '--fallback' } @ARGV) ? 1 : 0;
+if ($is_fallback && -e $sent_marker) {
+    if (open(my $mf, '<', $sent_marker)) {
+        my $d = <$mf>;
+        close($mf);
+        chomp($d) if defined $d;
+        if (defined $d && $d eq $today) {
+            print "Fallback: today's report ($today) already sent via event trigger — skipping.\n";
+            exit 0;
+        }
+    }
+}
+
 # Load email credentials from .env
 my ($email_address, $email_password) = load_env($env_file);
 
@@ -30,8 +51,13 @@ while (my $line = <$fh>) {
     if ($line =~ /HEARTBEAT \| (.+) \| (\d{2}:\d{2})/) {
         push @heartbeats, { status => $1, time => $2 };
     }
-    elsif ($line =~ /PREDATOR \| (\w+) \| confidence=([\d.]+) \| (\S+)/) {
-        push @predator_alerts, { type => $1, confidence => $2, time => $3 };
+    # PREDATOR line. As of 2026-09 the field device inserts a "pos=<loc>" field between the type
+    # and confidence (e.g. "PREDATOR | coyote | pos=R2R | confidence=0.86 | 20:13 | ..."). The
+    # "(?:pos=(\S+) \| )?" makes that position field OPTIONAL so this matches BOTH the new format
+    # (capturing the location) and older logs without it — the missing pos= was why the daily
+    # report's predator section came up empty after the location feature was added.
+    elsif ($line =~ /PREDATOR \| (\w+) \| (?:pos=(\S+) \| )?confidence=([\d.]+) \| (\S+)/) {
+        push @predator_alerts, { type => $1, position => ($2 // ''), confidence => $3, time => $4 };
     }
     elsif ($line =~ /(SUMMARY[123]) \| (.+)/) {
         # Append SUMMARY3 chunks, overwrite SUMMARY1/2
@@ -65,8 +91,13 @@ if (@predator_alerts) {
     $report .= scalar(@predator_alerts) . " alert(s) detected today!\n";
     for my $alert (@predator_alerts) {
         my $conf_pct = int($alert->{confidence} * 100);
-        $report .= "  $alert->{time} - $alert->{type} ($conf_pct%)\n";
+        my $loc = $alert->{position} ? "  Location: $alert->{position}" : "";
+        $report .= "  $alert->{time} - $alert->{type} ($conf_pct%)$loc\n";
     }
+    # Location key so the codes are actionable in the email.
+    $report .= "\n  Location key: turret position (C=center, L1/L2=left, R1/R2=right)\n";
+    $report .= "                + frame third (L=left, M=middle, R=right).\n";
+    $report .= "                e.g. R2L = right-2 position, left side of view.\n";
 } else {
     $report .= "No predator alerts today.\n";
 }
@@ -108,13 +139,14 @@ print "Report saved to: $report_file\n";
 # Build HTML email
 my $html = build_html($today);
 
-# Send email — with up to 3 attempts, 5 minutes apart (9:16, 9:21, 9:26).
-# The station's WiFi is intermittent; a single failed SMTP connect at 9:16 used to lose the whole
-# day's report (2026-07-15). Now we retry on failure and stop as soon as one send succeeds, so a
-# healthy night still sends exactly one email.
+# Send email — retry every 10 min for up to 1 hour (7 attempts: 0,10,20,30,40,50,60 min after start).
+# The station's WiFi is intermittent; a single failed SMTP connect used to lose the whole day's
+# report. Widened 2026-09-18 from 3×/5min to 7×/10min-over-1hr so a brief WiFi blip at report time
+# is caught once the connection recovers (e.g. the station's own reconnect runs). Stops as soon as
+# one send succeeds, so a healthy night still sends exactly one email.
 if ($email_address && $email_password) {
-    my $max_attempts = 3;
-    my $retry_gap    = 300;  # seconds between attempts (5 min)
+    my $max_attempts = 7;
+    my $retry_gap    = 600;  # seconds between attempts (10 min)
     my $sent = 0;
     for my $attempt (1 .. $max_attempts) {
         print "Email attempt $attempt/$max_attempts...\n";
@@ -133,6 +165,8 @@ if ($email_address && $email_password) {
     if ($sent) {
         print "Report emailed.\n";
         unlink $flag if -e $flag;
+        # Record that today's report went out, so the cron fallback (--fallback) won't double-send.
+        if (open(my $sf, '>', $sent_marker)) { print $sf $today; close($sf); }
     } else {
         print "All $max_attempts email attempts failed — report NOT sent.\n";
         if (open(my $fh, '>', $flag)) { print $fh $today; close($fh); }

@@ -15,26 +15,35 @@ The system consists of two devices. Field detector code lives in `src/`, display
 > 🎮 **Try the model live** — play with the latest predator detector in your browser (no setup):
 > **https://huggingface.co/spaces/JZVince/spotpredator**
 
-![SpotPredator in the field](img/spotpredator_001.jpeg)
+![SpotPredator field device — camera turret on the pole, solar panel and battery enclosure](img/spotpredator_002.jpeg)
 
 
 **Field Detector** — deployed outdoors near your animals
-- Captures images on a scan interval using an Arducam Camera Module 3
+- Captures images continuously using an Arducam Camera Module 3
 - Runs AI inference locally using a fine-tuned **PicoDet** object-detection TFLite model
-- **Rotating camera turret** — a 28BYJ-48 stepper sweeps the camera in a center-out pattern for wider coverage
-- Transmits alerts wirelessly to your home via LoRa radio
-- Sends heartbeat status updates every 30 minutes to keep you updated on system status
-- Operates on a schedule (default 6:30 AM – 9:01 PM)
+- **Rotating camera turret** — a 28BYJ-48 stepper sweeps the camera through 5 positions
+  (C, L1, L2, R1, R2) for near-360° coverage
+- **Second-look check against false positives** — before alerting, the turret turns toward the
+  detection, scans again, and only alerts if the two scans agree (see *How It Works*)
+- Transmits alerts wirelessly to your home via LoRa radio, including **where** the predator was
+  seen (e.g. `R2L` = right-2 position, left side of the view)
+- Sends heartbeat status updates every 30 minutes, plus an end-of-day scan summary
+- Operates on a configurable schedule (default 6:30 AM – 8:00 PM) — set the end time to dusk
+- Saves raw scan images only for 5 minutes after a detection, so the SD card doesn't fill up
+- Recovers from camera hangs on its own (service restart → full reboot → alert if still failing)
 - **Solar + battery powered** — true off-grid operation, no WiFi required
 - Housed in a **custom 3D-printed ABS enclosure** (field-validated through a Texas summer)
 
 **Display Station** — sits indoors on your desk
 - Receives LoRa alerts from the field device
-- Shows predator type, confidence, and time on an OLED display
-- Flashes the screen continuously until the threat clears
-- Sends you an immediate email alert on predator detection
-- Receives and logs a field scan summary report via LoRa
-- Generates a Perl-based daily report with ASCII confidence graph
+- Shows predator type, confidence, location, and time on an OLED display — flashes on a new
+  alert, then shows "seen N min ago" for 10 minutes
+- Shows field errors (e.g. camera failure) for 1 hour, while still showing heartbeats so you can
+  tell the field device is alive
+- Sends you an immediate email alert on predator detection. If the internet is down, missed
+  alerts are kept and sent as **one** catch-up email once it's back (no email bursts)
+- Generates a Perl-based daily report right after the field device's end-of-day summary
+  arrives (so it follows your end time), with an 11 PM fallback if the summary never arrives
 
 ---
 
@@ -55,8 +64,9 @@ The system consists of two devices. Field detector code lives in `src/`, display
 | 15-to-22 pin FFC cable | Required for Pi Zero camera connector |
 | DS3231 RTC Module | Real-time clock with CR2032 battery |
 | 12V LiFePO4 Battery (10Ah) | Field power supply |
-| 12V → 5V DC-DC Converter (3A) | Powers the Pi from battery |
-| 30W solar panel |
+| Solar charge controller (LiFePO4 mode, 5V USB output) | Charges the battery; its USB port powers the Pi |
+| 30W solar panel | |
+| 28BYJ-48 stepper + ULN2003 driver | Camera turret |
 
 ### Display Station (additional)
 | Component | Details |
@@ -75,7 +85,7 @@ converted to TensorFlow Lite (FP16) for on-device inference on the Pi Zero 2 W.
 
 - **Input**: 640x640 RGB image
 - **Deployment classes**: `coyote`, `fox`, `raptor`
-- **Confidence threshold**: 0.7 (configurable)
+- **Confidence threshold**: 0.8 (configurable)
 - **Runtime**: `tflite_runtime` / `ai-edge-litert` (CPU, XNNPACK)
 - **Trained on**: author-collected field images + LILA BC + GBIF imagery
 
@@ -94,7 +104,9 @@ inference so the images match.
 > **Model history / lesson learned**: This project started with an EfficientNetB0 classifier
 > (`background`/`poultry`/`predator`), then moved to YOLO object detection, and finally to
 > **PicoDet** — for better localization of small, distant animals and a permissive
-> (Apache-2.0) license. Key lesson: **before deploying, test your model on
+> (Apache-2.0) license. The current model is a PicoDet trained locally with LibreYOLO; it
+> outputs a single `[1, 8500, 7]` tensor (4 box coordinates + 3 class scores per anchor), which
+> `src/detector.py` detects and decodes automatically. Key lesson: **before deploying, test your model on
 > fresh local images and confirm reasonable output.** My original classifier was silently
 > returning ~66% "background" for every scan for two weeks — I only noticed because I happened
 > to check, not because anything failed (luckily no poultry were lost in that window).
@@ -111,8 +123,10 @@ flowchart TD
         CROP[Crop sky band →<br/>tile into 3× 640×640]
         YOLO[PicoDet TFLite<br/>inference on Pi Zero 2 W]
         HIT{Predator<br/>detected?}
+        VERIFY[Second look: turn toward<br/>the box, rescan, turn back]
+        OK{Avg of both scans<br/>≥ threshold?}
         MOTOR[Rotate camera turret<br/>to next scan position]
-        SLEEP[Sleep until 6:30 AM<br/>+ send daily summary]
+        SLEEP[Send daily summary<br/>then sleep until 6:30 AM]
     end
 
     subgraph LINK[" "]
@@ -129,8 +143,10 @@ flowchart TD
     SCHED -- yes --> CAM
     SCHED -- no --> SLEEP
     CAM --> CROP --> YOLO --> HIT
-    HIT -- yes --> LORA
-    HIT -- yes --> MOTOR
+    HIT -- yes --> VERIFY --> OK
+    OK -- yes --> LORA
+    OK -- yes --> MOTOR
+    OK -- no --> MOTOR
     HIT -- no --> MOTOR
     MOTOR --> SCHED
     LORA --> RX
@@ -138,6 +154,20 @@ flowchart TD
     RX --> EMAIL
     RX --> REPORT
 ```
+
+**Second-look check:** a first-scan detection is not alerted right away. The turret turns about
+22° toward where the box was (left tile → left, right tile → right, middle → one look each way),
+scans again, and turns back. The alert is sent only if
+
+```
+(first-scan confidence + best second-scan confidence for the same animal) / 2  ≥  threshold
+```
+
+A real animal shows up again; a one-frame fluke (shadow, glare, a leaf) usually doesn't. At the
+edge positions (L2/R2) the outward turn is limited to 5° to protect the camera cable. If the
+camera fails during the second look, the alert is sent anyway. Rejected detections still count
+in the daily summary's "detections by hour", and their second-look image is saved with a
+`_verify` suffix so you can review what fooled the model.
 
 **Heartbeat:** every 30 minutes the field device also sends a status heartbeat over LoRa so
 the display station knows the system is alive. **No WiFi or internet is needed between the two
@@ -203,7 +233,7 @@ Edit `config.yaml` to match your setup:
 
 ```yaml
 detector:
-  confidence_threshold: 0.85   # Raise to reduce false positives
+  confidence_threshold: 0.8     # Raise to reduce false positives
 
 hardware:
   lora:
@@ -211,13 +241,22 @@ hardware:
     network_id: 18              # Change if multiple LoRa networks nearby
 
 detection:
-  check_interval: 15            # Seconds between scans
+  check_interval: 0             # Extra seconds between scan cycles (0 = as fast as the Pi allows)
   cooldown_period: 180          # Seconds before re-alerting same predator
+  verify:
+    enabled: true               # Second-look check before alerting
+    shift_degrees: 22           # How far to turn toward the detection (~one tile)
+    edge_shift_degrees: 5       # Max outward turn at L2/R2 (camera cable limit)
+    invert_direction: false     # Set true if the second look turns AWAY from the animal
   schedule_enabled: true
-  start_hour: 6                 # Start scanning at 6:00 AM
-  end_hour: 21                  # Stop scanning at 9:01 PM
-  end_minute: 1
+  start_hour: 6                 # Start scanning at 6:30 AM
+  start_minute: 30
+  end_hour: 20                  # Stop scanning at 8:00 PM — set this to dusk where you are
+  end_minute: 0
 ```
+
+> Running with `check_interval: 0` keeps the Pi busy; in summer sun it can reach ~85°C and
+> throttle (safe, just slower). Raise `check_interval` a few seconds if you want it cooler.
 
 ### 6. Place Your Trained Model
 
@@ -225,7 +264,7 @@ Copy your trained TFLite model and labels to the `models/` directory:
 
 ```
 models/
-├── predator_picodet_s640_fp16.tflite
+├── predator_arm_b_mix_v4_fp16.tflite
 └── labels.txt
 ```
 
@@ -268,11 +307,20 @@ See [WIRING.md](WIRING.md) for full pin diagrams for both devices.
 - I'm not saying 5GHz won't work completely, but sure I had a lot issue with it.
 - Disable **WiFi 6 (802.11ax)** mode on your router — Pi Zero 2 W does not support it
 - Disable **roaming assistant** or **band steering** on your router — these features can kick pi devices out of connection due to low signal strength.
+- Use **WPA2-Personal** (not the mixed WPA2/WPA3 mode), and set Protected Management Frames to **Disabled** or **Capable** (not Required)
+- On ASUS routers, also turn off **Smart Connect**, **Target Wake Time**, and **WiFi Agile Multiband**
+- A Pi that connects and then drops 1–2 minutes later is the classic sign one of these is still on
+- **After a router factory reset, re-check all of the above** — a reset turns them all back on
 - Separate your 2.4GHz and 5GHz into two distinct networks and connect the Pi to the 2.4GHz one explicitly. A lot older devices work the best with 2.4GHz, same result for my BambuLab Printer and regular printer.
 - After changing router settings, re-flash the SD card with the correct WiFi credentials and try again
 
+### Device reboots randomly
+- If it reboots when the power plug is touched or wiggled, it's a loose USB power connector, not software
+- Strain-relieve the cable (a cable gland on the enclosure) so it can't move the plug
+
 ### Camera not working
 - Reseat the ribbon cable firmly — this is the most common cause
+- A turret that twists the ribbon cable will eventually tear it — check for small tears near the connector
 - Run `libcamera-hello` to test
 - Enable camera in `raspi-config` and reboot
 
@@ -304,15 +352,29 @@ See [WIRING.md](WIRING.md) for full pin diagrams for both devices.
 
 ---
 
+## Work in Progress
+
+> 🚧 These features are still being built and are **not ready to use yet**. The code is in the
+> repo, but expect it to change.
+
+- **WiFi setup over LoRa** — send the field device new WiFi details from the display station
+  over the LoRa radio (encrypted with a per-kit key), so the sealed field enclosure doesn't have
+  to be opened to change networks. Stays switched off until a kit key is created
+  (`scripts/make_kit_key.py`); detection works normally without it.
+- **Web application** — a browser dashboard for viewing detections and device status, and for
+  quicker installation and setup.
+
+---
+
 ## Future Plans
 
 - Keep growing the field-image dataset for better real-world accuracy
 - Expand predator classes with more species-specific training data
-- Add active homing (limit switch / hard stop) so the camera turret can recover an exact
-  reference position after a power loss mid-rotation
+- Add an absolute angle sensor (e.g. AS5600 magnetic encoder) so the turret always knows its
+  exact position after a power loss — a limit switch was ruled out because searching for it
+  would twist the camera cable
 - Add a physical button on the display station to acknowledge and clear alerts
 - Explore ESP32 as a lower-cost alternative for the display station
-- Write an app for quick installation
 
 ---
 

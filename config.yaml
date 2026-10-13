@@ -7,9 +7,9 @@ camera:
   rotation: 0  # Adjust if camera is mounted upside down
 
 detector:
-  model_path: "models/predator_picodet_s640_fp16.tflite"
+  model_path: "models/predator_arm_b_mix_v4_fp16.tflite"
   labels_path: "models/labels.txt"
-  confidence_threshold: 0.7
+  confidence_threshold: 0.8
   target_classes:
     - coyote
     - fox
@@ -43,12 +43,23 @@ alerts:
   log_path: "data/logs/detections.log"
 
 detection:
-  check_interval: 15  # Seconds between each check
+  check_interval: 0  # Seconds between cycles. 0 = no wait, run as fast as hardware allows (limit test). Raise to slow the scan / reduce heat.
   cooldown_period: 180  # Wait 3 minutes before alerting again for same animal type
+
+  # False-positive filter: on a first-scan detection, nudge the turret toward the box (left tile ->
+  # left, right tile -> right, middle -> both ways), rescan, return, and alert only if
+  # (first conf + second conf) / 2 >= confidence_threshold.
+  verify:
+    enabled: true
+    shift_degrees: 22        # ~one tile (66° camera FOV / 3) so the animal lands mid-frame
+    detect_floor: 0.3        # lowest conf read on the rescan (so the average has a real number)
+    settle_seconds: 1.5      # wait after each nudge before capturing
+    edge_shift_degrees: 5    # at L2/R2, an outward rescan rotates only this far (cable twist limit)
+    invert_direction: false  # set true if rescans rotate AWAY from the animal
 
   # Schedule: Only detect during these hours
   schedule_enabled: true  # Set to false to run 24/7
   start_hour: 6  # Start detection at 6:30 AM
   start_minute: 30
-  end_hour: 21  # End detection at 9:01 PM (21:00)
-  end_minute: 1
+  end_hour: 20  # End detection at 8:00 PM (season change — dark ~8pm now)
+  end_minute: 0

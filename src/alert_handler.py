@@ -36,6 +36,12 @@ class AlertHandler:
 
         logger.info("Alert handler initialized")
 
+    def in_cooldown(self, predator_type):
+        """True if an alert for this predator would currently be suppressed by the cooldown.
+        Read-only (does not start a cooldown) — used to skip a pointless verification rescan."""
+        last = self.last_alert_time.get(predator_type)
+        return last is not None and (datetime.now() - last).total_seconds() < self.cooldown_seconds
+
     def _should_alert(self, predator_type):
         """
         Check if we should alert for this predator (cooldown logic)
@@ -72,13 +78,14 @@ class AlertHandler:
         except Exception as e:
             logger.error(f"Failed to log detection: {e}")
 
-    def send_alert(self, detection, image=None):
+    def send_alert(self, detection, image=None, position='C'):
         """
         Send alert for detected predator
 
         Args:
             detection: Detection dict from detector
             image: Optional PIL Image or numpy array to save
+            position: Turret position label when detected (C, L1, L2, R1, R2)
 
         Returns:
             bool: True if alert sent successfully
@@ -101,7 +108,7 @@ class AlertHandler:
         # Send LoRa alert
         if self.lora_enabled and self.lora.lora_available:
             try:
-                self.lora.send_alert(predator_type, confidence, time_short, date_short)
+                self.lora.send_alert(predator_type, confidence, time_short, date_short, position)
                 logger.info("LoRa alert sent")
             except Exception as e:
                 logger.error(f"Failed to send LoRa alert: {e}")
