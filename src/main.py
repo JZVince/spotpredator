@@ -176,6 +176,9 @@ def main():
     # was (left tile -> rotate left, right tile -> right, middle -> both ways), takes a second look,
     # returns to its original spot, and only alerts if
     #       (first-scan conf + best second-scan conf) / 2  >=  confidence_threshold.
+    # The second scan counts ANY target predator, not just the first scan's class: on 2026-10-12 a
+    # real coyote was scored as a fox on the second look, the same-class rule rejected it, no alert
+    # was sent, and hens + ducks were lost. Same animal, different label — it must still count.
     # A real animal shows up again; a one-frame fluke (shadow, leaf, glare) usually doesn't.
     verify_cfg = config.get('detection', {}).get('verify', {})
     verify_enabled = verify_cfg.get('enabled', True)
@@ -200,6 +203,7 @@ def main():
         else:
             shifts = [verify_sign * verify_shift, -verify_sign * verify_shift]  # middle -> both
         best_conf, best_frame, best_tag, captured = 0.0, None, '', False
+        best_cls = ''
         old_thr = detector.confidence_threshold
         try:
             for shift in shifts:
@@ -214,9 +218,9 @@ def main():
                 captured = True
                 detector.confidence_threshold = verify_floor
                 for i, frame2 in enumerate(tiles2):
-                    for d in detector.detect_predators(frame2, predator_classes=[cls]):
-                        if d['class'] == cls and d['confidence'] > best_conf:
-                            best_conf, best_frame = d['confidence'], frame2
+                    for d in detector.detect_predators(frame2, predator_classes=target_classes):
+                        if d['confidence'] > best_conf:      # any predator class counts
+                            best_conf, best_frame, best_cls = d['confidence'], frame2, d['class']
                             best_tag = f"{tile_tag}{moved:+.0f}{'LMR'[i]}"
                 detector.confidence_threshold = old_thr
         except Exception as e:  # noqa: BLE001
@@ -230,14 +234,15 @@ def main():
             return True, first_conf, None
         avg = (first_conf + best_conf) / 2
         confirmed = avg >= alert_threshold
-        scan_logger.info(f"verify | {cls} first={first_conf:.2f} second={best_conf:.2f} "
+        second_as = f" (seen as {best_cls})" if best_cls and best_cls != cls else ""
+        scan_logger.info(f"verify | {cls} first={first_conf:.2f} second={best_conf:.2f}{second_as} "
                          f"avg={avg:.2f} at={best_tag or tile_tag} -> {'CONFIRMED' if confirmed else 'REJECTED'}")
-        logger.info(f"🔍 Verify {cls} [{tile_tag}]: first {first_conf:.2f}, second {best_conf:.2f}, "
+        logger.info(f"🔍 Verify {cls} [{tile_tag}]: first {first_conf:.2f}, second {best_conf:.2f}{second_as}, "
                     f"avg {avg:.2f} → {'CONFIRMED — alerting' if confirmed else 'rejected as likely false positive'}")
         if best_frame is not None:  # keep the second-look image next to the first-scan image
             try:
                 PILImage.fromarray(best_frame[:, :, ::-1]).save(
-                    str(clean_detection_path / f"{ts}_{best_tag}_{cls}_{int(best_conf*100)}%_verify.jpg"),
+                    str(clean_detection_path / f"{ts}_{best_tag}_{best_cls or cls}_{int(best_conf*100)}%_verify.jpg"),
                     quality=92)
             except Exception as e:  # noqa: BLE001
                 logger.error(f"Failed to save verification image: {e}")
@@ -248,7 +253,12 @@ def main():
 
     # Image cleanup tracking
     last_cleanup_month = None
-    last_weekly_cleanup = None
+    # Weekly cleanup date is kept in a FILE so a restart doesn't forget it (2026-10-14).
+    WEEKLY_CLEANUP_FILE = Path('data/.last_weekly_cleanup')
+    try:
+        last_weekly_cleanup = date.fromisoformat(WEEKLY_CLEANUP_FILE.read_text().strip())
+    except Exception:  # noqa: BLE001  (missing / unreadable -> treat as never run)
+        last_weekly_cleanup = None
 
     # Scan image path
     scan_image_path = Path('data/scans/')
@@ -788,8 +798,16 @@ def main():
                         send_heartbeat()
                         hb['last_minute'] = now_minute
 
-                # Weekly cleanup: delete all scan images every Monday at start time
-                if now_dt.weekday() == 0 and now_dt.hour == start_hour and now_dt.minute == start_minute and last_weekly_cleanup != now_dt.date():
+                # Weekly cleanup: delete scan images and trim logs once a week.
+                # Runs on the FIRST active cycle on a Monday, or as a catch-up once 7+ days have passed
+                # (e.g. the device was off on Monday). It used to require Monday at EXACTLY the start
+                # minute (06:30), so a late power-on, a slow first cycle after waking, or a reboot made
+                # it skip silently — and a missed week was never caught up (2026-10-14).
+                _today = now_dt.date()
+                _due = (last_weekly_cleanup is None
+                        or (now_dt.weekday() == 0 and last_weekly_cleanup != _today)
+                        or (_today - last_weekly_cleanup).days >= 7)
+                if _due:
                     deleted = 0
                     for f in scan_image_path.glob('*.jpg'):
                         try:
@@ -798,13 +816,24 @@ def main():
                         except Exception as e:
                             logger.error(f"Failed to delete scan image {f}: {e}")
                     logger.info(f"🗑️  Weekly cleanup: deleted {deleted} scan images")
+                    # Trim logs but KEEP today's lines — scan_confidence.log feeds tonight's daily
+                    # summary, and the cleanup can now run mid-day.
+                    _prefix = _today.strftime('%Y-%m-%d')
                     for log_file in ['data/logs/spotpredator.log', 'data/logs/scan_confidence.log', 'data/logs/wifi_reconnect.log']:
                         try:
-                            open(log_file, 'w').close()
+                            if os.path.exists(log_file):
+                                with open(log_file, 'r', encoding='utf-8', errors='ignore') as lf:
+                                    keep = [ln for ln in lf if ln.startswith(_prefix)]
+                                with open(log_file, 'w', encoding='utf-8') as lf:
+                                    lf.writelines(keep)
                         except Exception as e:
-                            logger.error(f"Failed to clear log {log_file}: {e}")
-                    logger.info("🗑️  Weekly cleanup: logs cleared")
-                    last_weekly_cleanup = now_dt.date()
+                            logger.error(f"Failed to trim log {log_file}: {e}")
+                    logger.info("🗑️  Weekly cleanup: logs trimmed to today's entries")
+                    last_weekly_cleanup = _today
+                    try:
+                        WEEKLY_CLEANUP_FILE.write_text(_today.isoformat())
+                    except Exception as e:
+                        logger.error(f"Could not record weekly cleanup date: {e}")
 
                 # Monthly cleanup: delete detection images older than 30 days
                 today = now_dt.date()

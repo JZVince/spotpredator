@@ -15,7 +15,15 @@ The system consists of two devices. Field detector code lives in `src/`, display
 > 🎮 **Try the model live** — play with the latest predator detector in your browser (no setup):
 > **https://huggingface.co/spaces/JZVince/spotpredator**
 
-![SpotPredator field device — camera turret on the pole, solar panel and battery enclosure](img/spotpredator_002.jpeg)
+<p align="center">
+  <img src="img/spotpredator_002.jpeg" height="300" alt="SpotPredator field device — camera turret on the pole, solar panel and battery enclosure">
+  <img src="img/2026-10-12_10-18-02_L2L_coyote_95%25.jpg" height="300" alt="Coyote detected at 95% confidence, carrying off a bird">
+  <img src="img/2026-10-12_10-50-36_R1M_fox_85%25.jpg" height="300" alt="The same coyote later that morning, labelled fox at 85%">
+</p>
+<p align="center"><sub>
+  Left: the field device. Middle and right: real detections from 12 Oct 2026 — a coyote taking a
+  bird at 10:18 (95%), and the same coyote at 10:50, which the model labelled <i>fox</i> (85%).
+</sub></p>
 
 
 **Field Detector** — deployed outdoors near your animals
